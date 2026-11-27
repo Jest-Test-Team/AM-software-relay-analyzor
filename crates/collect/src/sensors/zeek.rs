@@ -73,7 +73,11 @@ pub fn parse(text: &str, fields: &mut Vec<String>) -> Batch {
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
         if let Some(rest) = line.strip_prefix("#fields") {
-            *fields = rest.split('\t').filter(|s| !s.is_empty()).map(String::from).collect();
+            *fields = rest
+                .split('\t')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
             continue;
         }
         if line.starts_with('#') || line.trim().is_empty() {

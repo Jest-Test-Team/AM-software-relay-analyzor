@@ -412,8 +412,24 @@ impl Store {
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (fs, ls, pid, process, proto, sip, sport, dip, dport, dmac, state, bi, bo, org, smac, oc) =
-                row?;
+            let (
+                fs,
+                ls,
+                pid,
+                process,
+                proto,
+                sip,
+                sport,
+                dip,
+                dport,
+                dmac,
+                state,
+                bi,
+                bo,
+                org,
+                smac,
+                oc,
+            ) = row?;
             out.push(Flow {
                 first_seen: parse_ts(&fs)?,
                 last_seen: parse_ts(&ls)?,

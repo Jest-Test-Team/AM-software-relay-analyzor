@@ -302,9 +302,7 @@ impl ConnCounts {
                 FlowOutcome::Active if f.origin == FlowOrigin::Nettop && f.last_seen < gone => {
                     closed()
                 }
-                FlowOutcome::Active if f.origin.is_sensor() && f.last_seen < stale => {
-                    c.stale += 1
-                }
+                FlowOutcome::Active if f.origin.is_sensor() && f.last_seen < stale => c.stale += 1,
                 FlowOutcome::Active => c.active += 1,
                 FlowOutcome::Closed => closed(),
                 FlowOutcome::Failed => c.failed += 1,
@@ -396,7 +394,10 @@ mod tests {
 
     #[test]
     fn tcp_state_mapping() {
-        assert_eq!(FlowOutcome::from_tcp_state("Established"), FlowOutcome::Active);
+        assert_eq!(
+            FlowOutcome::from_tcp_state("Established"),
+            FlowOutcome::Active
+        );
         assert_eq!(FlowOutcome::from_tcp_state("TimeWait"), FlowOutcome::Closed);
         assert_eq!(FlowOutcome::from_tcp_state("SynSent"), FlowOutcome::Failed);
         assert_eq!(FlowOutcome::from_tcp_state(""), FlowOutcome::Active);

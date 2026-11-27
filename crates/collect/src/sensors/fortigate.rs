@@ -49,10 +49,7 @@ pub fn parse_line(line: &str, now: DateTime<Utc>) -> Option<Batch> {
         .get("srcmac")
         .and_then(|m| m.parse().ok())
         .filter(|m: &Mac| !m.is_broadcast() && !m.is_multicast());
-    let label = kv
-        .get("app")
-        .or(kv.get("service"))
-        .map(|s| s.to_string());
+    let label = kv.get("app").or(kv.get("service")).map(|s| s.to_string());
     let flow = Flow {
         first_seen: ts - Duration::seconds(num("duration").unwrap_or(0) as i64),
         last_seen: ts,
@@ -100,7 +97,10 @@ fn timestamp(kv: &HashMap<&str, &str>) -> Option<DateTime<Utc>> {
         let tz = kv.get("tz").and_then(|z| parse_tz(z));
         return match tz {
             Some(off) => off.from_local_datetime(&naive).single().map(|t| t.to_utc()),
-            None => Local.from_local_datetime(&naive).earliest().map(|t| t.to_utc()),
+            None => Local
+                .from_local_datetime(&naive)
+                .earliest()
+                .map(|t| t.to_utc()),
         };
     }
     let e: i64 = kv.get("eventtime")?.parse().ok()?;
