@@ -9,7 +9,7 @@ Plan: [PLAN.md](PLAN.md)
 | P2 Threat intel | ✅ done | offline Feodo + Spamhaus DROP; keyed ThreatFox + AbuseIPDB |
 | P3 Baseline & risk | ✅ done | `assess`; synthetic IOC test → Red |
 | P4 TUI | ✅ done | `relayscan tui` |
-| P5 Kaspersky adapter | blocked on user spike | |
+| P5 Kaspersky adapter | 🟡 tooling done; needs a user-run spike | `--features kaspersky` |
 
 ## P0 — alignment check (2026-11-27)
 
@@ -115,3 +115,29 @@ Additions:
 Verification:
 - Unit tests use ratatui `TestBackend` to render the list and detail, and check that navigation clamps at the ends.
 - Live smoke test under a pseudo-TTY (150×40) against the real store: it rendered "Devices — 93 online", MAC, Last seen, "NEW DEVICE" and "Risk: Green", and `q` exited with status 0.
+
+## P5 — alignment check (2026-11-27)
+
+| Plan item | Status |
+|---|---|
+| Read-only adapter behind `--features kaspersky` | ✅ `relayscan kaspersky probe|import <file>`. Uses SQLite `SQLITE_OPEN_READ_ONLY`. |
+| "Only after the spike" | ⚠️ The permission classifier blocked Claude from reading the live Kaspersky files, which is correct. So the adapter is **schema-agnostic**: `probe` *is* the spike tool, and you run it on your own copies. |
+| Do not disable Self-Defense | ✅ Documented; the tool only reads copies. |
+
+**Spike for you to run** (copy first, so Kaspersky's live files are never opened):
+```
+D="/Library/Application Support/Kaspersky Lab/KAV/Data"
+mkdir -p /tmp/kdb && cp "$D"/reports.db* "$D"/detects.db* "$D"/persistent_q.db* /tmp/kdb/
+ls -la "$D/nhdp"                    # likely Smart Home Monitor data
+cargo run --features kaspersky -- kaspersky probe /tmp/kdb/reports.db
+cargo run --features kaspersky -- kaspersky import /tmp/kdb/reports.db --dry-run
+```
+If no table shows `mac-like > 0`, the Smart Home Monitor list is not stored in these readable DBs; it may be in root-only `data.kvdb` or in `nhdp/`. In that case keep using `compare --kaspersky` with a hand-made CSV as the benchmark, as the plan's fallback says.
+
+Verification: a unit test builds a synthetic SQLite DB. `probe` finds 2 IPs and 2 MACs, and `import` yields 2 `Source::Kaspersky` observations with names. Version strings such as `27.1.0.5` are not mistaken for IPs.
+
+## Summary of open backlog
+- **B1** Passive DHCP option 12 / LLMNR / NetBIOS names (pcap, root). This would name devices like Android_OUJZGW45 that advertise no mDNS.
+- **B3** ASN lookup (RIPEstat or a local DB), to replace the /24 and /48 baseline buckets.
+- **B4** Run the Kaspersky spike above, then specialise `import` for whichever table holds devices.
+- **Later (plan §7):** MCP server, Flutter UI or merging into `rp_app`, and a Pi + Zeek sensor at the gateway for traffic from other devices.
