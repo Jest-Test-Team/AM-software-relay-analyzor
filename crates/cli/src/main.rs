@@ -27,6 +27,9 @@ struct Cli {
     /// IEEE OUI CSV (default: $RELAYSCAN_OUI or ./data/oui.csv)
     #[arg(long, global = true)]
     oui: Option<PathBuf>,
+    /// Display language: en | zh-TW (default: $RELAYSCAN_LANG, then $LANG / macOS setting)
+    #[arg(long, global = true)]
+    lang: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -117,6 +120,7 @@ fn load_oui(cli: &Cli) -> OuiDb {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut store = Store::open(db_path(&cli)?)?;
+    let lang = relay_core::Lang::detect(cli.lang.as_deref(), &|k| std::env::var(k).ok());
     match &cli.cmd {
         Cmd::Discover(args) => discover::run(&mut store, &load_oui(&cli), args),
         Cmd::Watch(args) => watch::run(&mut store, &load_oui(&cli), args),
@@ -128,8 +132,8 @@ fn main() -> Result<()> {
         Cmd::Syslog(a) => sensors::syslog(&mut store, &load_oui(&cli), a),
         Cmd::Fortigate(c) => sensors::fortigate(&mut store, &load_oui(&cli), c),
         Cmd::Intel(args) => intel::run(&store, args),
-        Cmd::Assess(args) => assess::run(&store, args),
-        Cmd::Tui(args) => tui::run(&mut store, &load_oui(&cli), args),
+        Cmd::Assess(args) => assess::run(&store, args, lang),
+        Cmd::Tui(args) => tui::run(&mut store, &load_oui(&cli), args, lang),
         #[cfg(feature = "kaspersky")]
         Cmd::Kaspersky(c) => kaspersky::run(&mut store, &load_oui(&cli), c),
         Cmd::Devices { json, all } => {
@@ -141,7 +145,7 @@ fn main() -> Result<()> {
             if *json {
                 println!("{}", serde_json::to_string_pretty(&devs)?);
             } else {
-                table::print_devices(&devs);
+                table::print_devices(lang, &devs);
             }
             Ok(())
         }

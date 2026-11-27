@@ -1652,6 +1652,7 @@ dependencies = [
  "relay-core",
  "relay-intel",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

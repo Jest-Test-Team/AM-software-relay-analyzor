@@ -5,7 +5,9 @@
 //! Score, level and confidence are separate outputs: a device with no
 //! behavioural data and no positive signals is `Gray`, never `Green`.
 
+use crate::i18n::{self, Lang};
 use crate::model::*;
+use crate::tr;
 use crate::Mac;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,9 @@ pub struct RiskConfig {
     pub w_baseline_deviation: i32,
     pub w_large_egress: i32,
     pub w_trusted_baseline: i32,
+    pub w_denied_by_firewall: i32,
+    pub w_conn_failures: i32,
+    pub w_lan_scan: i32,
 
     /// Minimum TI confidence for an IOC hit to count.
     pub ioc_min_confidence: f32,
@@ -44,6 +49,14 @@ pub struct RiskConfig {
     pub baseline_min_span_hours: i64,
     /// Bytes sent off-link within the evaluation window.
     pub egress_bytes_threshold: u64,
+    /// Firewall-denied connections in the window (FortiGate `action=deny`).
+    pub denied_min: usize,
+    /// Failed connections (no answer / reset) in the window: count and share.
+    pub failures_min: usize,
+    pub failures_min_ratio: f64,
+    /// Distinct LAN hosts, or LAN host:port pairs, contacted in the window.
+    pub lan_scan_min_hosts: usize,
+    pub lan_scan_min_ports: usize,
     /// Below this confidence (and with no positive signals) the level is Gray.
     pub gray_below_confidence: f32,
 }
@@ -59,6 +72,9 @@ impl Default for RiskConfig {
             w_baseline_deviation: 20,
             w_large_egress: 25,
             w_trusted_baseline: -15,
+            w_denied_by_firewall: 15,
+            w_conn_failures: 10,
+            w_lan_scan: 30,
             ioc_min_confidence: 0.75,
             ip_churn_threshold: 3,
             reports_min_reporters: 2,
@@ -72,6 +88,11 @@ impl Default for RiskConfig {
             baseline_min_new_ratio: 0.5,
             baseline_min_span_hours: 24,
             egress_bytes_threshold: 500 * 1024 * 1024,
+            denied_min: 5,
+            failures_min: 10,
+            failures_min_ratio: 0.3,
+            lan_scan_min_hosts: 20,
+            lan_scan_min_ports: 50,
             gray_below_confidence: 0.5,
         }
     }
@@ -90,8 +111,11 @@ pub enum Signal {
     GatewayTakeover,
     MultiSourceReports,
     Beaconing,
+    LanScan,
     BaselineDeviation,
     LargeEgress,
+    DeniedByFirewall,
+    ConnFailures,
     TrustedBaseline,
 }
 
@@ -119,11 +143,20 @@ pub struct Assessment {
     /// Suggested follow-up actions, most important first.
     #[serde(default)]
     pub actions: Vec<String>,
+    /// Connections in the window: active / closed / other. `None` when this
+    /// device's traffic cannot be observed at all.
+    #[serde(default)]
+    pub counts: Option<ConnCounts>,
+    #[serde(default)]
+    pub lang: Lang,
 }
 
 /// One factor of the confidence score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
+    /// Stable identifier (English), independent of the display language.
+    #[serde(default)]
+    pub key: String,
     pub factor: String,
     pub weight: f32,
     pub present: bool,
@@ -136,7 +169,7 @@ pub struct Inputs<'a> {
     pub ip_history: &'a [IpBinding],
     /// If this device is bound to the gateway IP: the MAC that held it first.
     pub gateway_original_mac: Option<Mac>,
-    /// Flows originated by this device in the evaluation window (self only).
+    /// Flows originated by this device in the evaluation window.
     pub window_flows: &'a [Flow],
     /// Older flows from this device, forming its behavioural baseline.
     pub baseline_flows: &'a [Flow],
@@ -144,15 +177,34 @@ pub struct Inputs<'a> {
     pub verdicts: &'a HashMap<IpAddr, Vec<Verdict>>,
     /// Whether flow destinations were checked against any TI source.
     pub ti_checked: bool,
-    /// True if this device's connections can be observed at all (today: only
-    /// the host running relayscan). False ⇒ Gray means "not observable",
-    /// not "idle".
+    /// True if this device's connections can be observed at all: it is the
+    /// host running relayscan, or a network sensor (FortiGate/Zeek) has
+    /// reported its traffic. False ⇒ Gray means "not observable", not "idle".
     pub traffic_visible: bool,
+    /// Whether any network sensor (FortiGate/Zeek) is feeding the store.
+    pub sensors_active: bool,
     pub is_on_link: &'a dyn Fn(&IpAddr) -> bool,
+    pub lang: Lang,
+}
+
+fn origins_label(flows: &[Flow]) -> String {
+    let mut o: Vec<&str> = Vec::new();
+    for f in flows {
+        let s = match f.origin {
+            FlowOrigin::Nettop => "nettop",
+            FlowOrigin::Fortigate => "FortiGate",
+            FlowOrigin::Zeek => "Zeek",
+        };
+        if !o.contains(&s) {
+            o.push(s);
+        }
+    }
+    o.join("+")
 }
 
 pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment {
     let d = inp.device;
+    let l = inp.lang;
     let mut reasons: Vec<Reason> = Vec::new();
     fn add(reasons: &mut Vec<Reason>, signal: Signal, delta: i32, detail: String) {
         if delta != 0 {
@@ -187,21 +239,28 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
         }
     }
     if !ioc.is_empty() {
+        let s = join(&ioc);
         add(
             &mut reasons,
             Signal::IocHit,
             cfg.w_ioc,
-            format!("destination matches malicious IOC: {}", join(&ioc)),
+            tr!(
+                l,
+                "destination matches malicious IOC: {s}",
+                "目的地命中惡意 IOC：{s}"
+            ),
         );
     }
     if !reported.is_empty() {
+        let s = join(&reported);
         add(
             &mut reasons,
             Signal::MultiSourceReports,
             cfg.w_multi_source_reports,
-            format!(
-                "destination has multi-source abuse reports: {}",
-                join(&reported)
+            tr!(
+                l,
+                "destination has multi-source abuse reports: {s}",
+                "目的地有多來源惡意活動回報：{s}"
             ),
         );
     }
@@ -215,14 +274,15 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
         .map(|b| b.ip)
         .collect();
     if recent_v4.len() >= cfg.ip_churn_threshold {
+        let (n, s) = (recent_v4.len(), join(&recent_v4));
         add(
             &mut reasons,
             Signal::IpChurn,
             cfg.w_ip_churn,
-            format!(
-                "MAC bound to {} IPv4 addresses in 24h: {}",
-                recent_v4.len(),
-                join(&recent_v4)
+            tr!(
+                l,
+                "MAC bound to {n} IPv4 addresses in 24h: {s}",
+                "此 MAC 在 24 小時內綁定了 {n} 個 IPv4 位址：{s}"
             ),
         );
     }
@@ -231,20 +291,48 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
             &mut reasons,
             Signal::GatewayTakeover,
             cfg.w_gateway_takeover,
-            format!("claims the gateway IP previously held by {orig} (possible ARP spoofing)"),
+            tr!(
+                l,
+                "claims the gateway IP previously held by {orig} (possible ARP spoofing)",
+                "宣告擁有原屬於 {orig} 的閘道 IP（可能是 ARP 欺騙）"
+            ),
         );
     }
 
     // --- behaviour ----------------------------------------------------------
     let beacons = beaconing(cfg, inp.window_flows.iter().chain(inp.baseline_flows));
     if let Some(b) = beacons.first() {
+        let (p, dst, port, mean, cv, n) = (&b.process, b.dst, b.port, b.mean_s, b.cv, b.n);
         add(
             &mut reasons,
             Signal::Beaconing,
             cfg.w_beaconing,
-            format!(
-                "periodic connections {} → {}:{} every {:.0}s (cv {:.2}, n={})",
-                b.process, b.dst, b.port, b.mean_s, b.cv, b.n
+            tr!(
+                l,
+                "periodic connections {p} → {dst}:{port} every {mean:.0}s (cv {cv:.2}, n={n})",
+                "週期性連線 {p} → {dst}:{port}，每 {mean:.0} 秒一次（變異係數 {cv:.2}，n={n}）"
+            ),
+        );
+    }
+    // LAN scanning: many distinct on-link peers (ignore our own sweep).
+    let lan: Vec<&Flow> = inp
+        .window_flows
+        .iter()
+        .filter(|f| (inp.is_on_link)(&f.dst_ip))
+        .filter(|f| !f.process.as_deref().unwrap_or("").starts_with("relayscan"))
+        .collect();
+    let lan_hosts: BTreeSet<IpAddr> = lan.iter().map(|f| f.dst_ip).collect();
+    let lan_ports: BTreeSet<(IpAddr, u16)> = lan.iter().map(|f| (f.dst_ip, f.dst_port)).collect();
+    if lan_hosts.len() >= cfg.lan_scan_min_hosts || lan_ports.len() >= cfg.lan_scan_min_ports {
+        let (h, p) = (lan_hosts.len(), lan_ports.len());
+        add(
+            &mut reasons,
+            Signal::LanScan,
+            cfg.w_lan_scan,
+            tr!(
+                l,
+                "contacted {h} LAN hosts / {p} host:port pairs in the window (looks like scanning)",
+                "時間窗內連線 {h} 台區網主機／{p} 組主機:埠（疑似掃描）"
             ),
         );
     }
@@ -264,11 +352,53 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
         .filter_map(|f| f.bytes_out)
         .sum();
     if egress >= cfg.egress_bytes_threshold {
+        let mb = egress / (1024 * 1024);
         add(
             &mut reasons,
             Signal::LargeEgress,
             cfg.w_large_egress,
-            format!("{} MB sent off-link in window", egress / (1024 * 1024)),
+            tr!(
+                l,
+                "{mb} MB sent off-link in window",
+                "時間窗內對外傳送 {mb} MB"
+            ),
+        );
+    }
+    let denied = inp
+        .window_flows
+        .iter()
+        .filter(|f| f.outcome == FlowOutcome::Denied)
+        .count();
+    if denied >= cfg.denied_min {
+        let eg = denied_examples(inp.window_flows);
+        add(
+            &mut reasons,
+            Signal::DeniedByFirewall,
+            cfg.w_denied_by_firewall,
+            tr!(
+                l,
+                "{denied} connections blocked by the firewall, e.g. {eg}",
+                "{denied} 條連線被防火牆阻擋，例如 {eg}"
+            ),
+        );
+    }
+    let failed = inp
+        .window_flows
+        .iter()
+        .filter(|f| f.outcome == FlowOutcome::Failed)
+        .count();
+    let total = inp.window_flows.len().max(1);
+    if failed >= cfg.failures_min && failed as f64 / total as f64 >= cfg.failures_min_ratio {
+        let pct = failed * 100 / total;
+        add(
+            &mut reasons,
+            Signal::ConnFailures,
+            cfg.w_conn_failures,
+            tr!(
+                l,
+                "{failed} of {total} connections failed ({pct}%): unanswered or reset",
+                "{total} 條連線中有 {failed} 條失敗（{pct}%）：無回應或被重置"
+            ),
         );
     }
     let (has_baseline, span_h) = baseline_ready(cfg, inp.baseline_flows);
@@ -278,7 +408,11 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
             &mut reasons,
             Signal::TrustedBaseline,
             cfg.w_trusted_baseline,
-            "trusted device, matches baseline".into(),
+            tr!(
+                l,
+                "trusted device, matches baseline",
+                "受信任裝置，行為符合基線"
+            ),
         );
     }
 
@@ -289,92 +423,152 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
     let vendor_known = d.vendor.is_some() && !d.mac_randomized;
     let flows_seen = !inp.window_flows.is_empty();
     let stable = inp.ip_history.len() > 1 || d.last_seen - d.first_seen > Duration::hours(1);
-    let ev = |factor: &str, weight: f32, present: bool, yes: String, no: String| Evidence {
-        factor: factor.into(),
-        weight,
-        present,
-        note: if present { yes } else { no },
-    };
+    let ev =
+        |key: &str, factor: String, weight: f32, present: bool, yes: String, no: String| Evidence {
+            key: key.into(),
+            factor,
+            weight,
+            present,
+            note: if present { yes } else { no },
+        };
+    let not_observable = tr!(l, "not observable from this Mac", "從這台 Mac 無法觀測");
+    let (n_win, n_base, via) = (
+        inp.window_flows.len(),
+        inp.baseline_flows.len(),
+        origins_label(inp.window_flows),
+    );
+    let (min_flows, min_span) = (cfg.baseline_min_flows, cfg.baseline_min_span_hours);
+    let first = d.first_seen.format("%Y-%m-%d %H:%M").to_string();
+    let svc = d
+        .services
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (dn, vl) = (i18n::display_name(l, d), i18n::vendor_label(l, d));
     let evidence = vec![
         ev(
             "Identity",
+            tr!(l, "Identity", "身分識別"),
             0.25,
             named || vendor_known,
-            format!("{} / {}", d.display_name(), d.vendor_label()),
+            format!("{dn} / {vl}"),
             if d.mac_randomized {
-                "no name, and a randomized MAC hides the vendor".into()
+                tr!(
+                    l,
+                    "no name, and a randomized MAC hides the vendor",
+                    "沒有名稱，且隨機化 MAC 隱藏了廠商"
+                )
             } else {
-                "no name and vendor not in the IEEE registry".into()
+                tr!(
+                    l,
+                    "no name and vendor not in the IEEE registry",
+                    "沒有名稱，廠商也不在 IEEE 登錄中"
+                )
             },
         ),
         ev(
             "Advertised services",
+            tr!(l, "Advertised services", "公告的服務"),
             0.05,
             !d.services.is_empty(),
-            d.services
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", "),
-            "nothing announced via mDNS/SSDP".into(),
+            svc,
+            tr!(
+                l,
+                "nothing announced via mDNS/SSDP",
+                "未透過 mDNS/SSDP 公告任何服務"
+            ),
         ),
         ev(
             "Stable presence",
+            tr!(l, "Stable presence", "穩定存在"),
             0.1,
             stable,
-            format!("seen since {}", d.first_seen.format("%Y-%m-%d %H:%M")),
-            "only just appeared".into(),
+            tr!(l, "seen since {first}", "自 {first} 起可見"),
+            tr!(l, "only just appeared", "剛剛才出現"),
         ),
         ev(
             "Traffic visible",
+            tr!(l, "Traffic visible", "流量可見"),
             0.3,
             flows_seen,
-            format!("{} connections in the window", inp.window_flows.len()),
+            tr!(
+                l,
+                "{n_win} connections in the window via {via}",
+                "時間窗內 {n_win} 條連線（來源：{via}）"
+            ),
             if inp.traffic_visible {
-                "no connections captured yet (run `relayscan watch` or press r)".into()
+                if inp.sensors_active {
+                    tr!(
+                        l,
+                        "sensor is reporting, but no connections from it in the window (idle?)",
+                        "感測器運作中，但時間窗內沒有它的連線（閒置？）"
+                    )
+                } else {
+                    tr!(
+                        l,
+                        "no connections captured yet (run `relayscan watch` or press r)",
+                        "尚未擷取到連線（執行 `relayscan watch` 或按 r）"
+                    )
+                }
             } else if d.device_type == DeviceType::Router {
-                "it forwards everyone's traffic, but only its own logs can show that".into()
+                tr!(
+                    l,
+                    "it forwards everyone's traffic, but only its own logs can show that",
+                    "它轉送所有人的流量，但只有它自己的日誌能呈現"
+                )
             } else {
-                "its connections go straight to the gateway, not through this Mac".into()
+                tr!(
+                    l,
+                    "its connections go straight to the gateway, not through this Mac",
+                    "它的連線直接送往閘道，不經過這台 Mac"
+                )
             },
         ),
         ev(
             "Threat-intel check",
+            tr!(l, "Threat-intel check", "威脅情資比對"),
             0.15,
             inp.ti_checked && flows_seen,
-            "destinations checked against blocklists/APIs".into(),
+            tr!(
+                l,
+                "destinations checked against blocklists/APIs",
+                "目的地已與黑名單／API 比對"
+            ),
             if inp.traffic_visible {
-                "no destinations to check yet".into()
+                tr!(l, "no destinations to check yet", "尚無目的地可比對")
             } else {
-                "not observable from this Mac".into()
+                not_observable.clone()
             },
         ),
         ev(
             "Behaviour baseline",
+            tr!(l, "Behaviour baseline", "行為基線"),
             0.1,
             has_baseline,
-            format!(
-                "{} older connections over {span_h}h to compare against",
-                inp.baseline_flows.len()
+            tr!(
+                l,
+                "{n_base} older connections over {span_h}h to compare against",
+                "{span_h} 小時內 {n_base} 條較早的連線可供比對"
             ),
             if !inp.traffic_visible {
-                "not observable from this Mac".into()
+                not_observable
             } else {
-                format!(
-                    "still learning: {} connections over {span_h}h (needs ≥{} over ≥{}h)",
-                    inp.baseline_flows.len(),
-                    cfg.baseline_min_flows,
-                    cfg.baseline_min_span_hours
+                tr!(
+                    l,
+                    "still learning: {n_base} connections over {span_h}h (needs ≥{min_flows} over ≥{min_span}h)",
+                    "學習中：{span_h} 小時內 {n_base} 條連線（需要 ≥{min_span} 小時內 ≥{min_flows} 條）"
                 )
             },
         ),
         ev(
             "Owner confirmed",
+            tr!(l, "Owner confirmed", "擁有者確認"),
             0.2,
             d.trusted,
-            "marked trusted".into(),
-            "not marked trusted".into(),
+            tr!(l, "marked trusted", "已標記為信任"),
+            tr!(l, "not marked trusted", "尚未標記為信任"),
         ),
     ];
     let confidence: f32 = evidence
@@ -397,15 +591,20 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
         .filter(|r| r.delta > 0)
         .map(|r| r.signal)
         .collect();
+    let ns = signals.len();
     let summary = match level {
-        RiskLevel::Red => "Contacts known-malicious infrastructure or shows strong attack signs — act now.".to_string(),
-        RiskLevel::Orange => format!("High risk: {} warning signal(s) need prompt investigation.", signals.len()),
-        RiskLevel::Yellow => format!("Suspicious: {} signal(s) worth checking.", signals.len()),
-        RiskLevel::Green => "No risk signals in the observed traffic.".to_string(),
-        RiskLevel::Gray if !inp.traffic_visible => "Unrated, not idle: it is online (answers ARP on the LAN), but its traffic does not pass through this Mac, so its behaviour cannot be judged.".to_string(),
-        RiskLevel::Gray => "Unrated: not enough data collected yet.".to_string(),
+        RiskLevel::Red => tr!(l, "Contacts known-malicious infrastructure or shows strong attack signs — act now.", "連線到已知惡意設施或出現明顯攻擊跡象 — 請立即處理。"),
+        RiskLevel::Orange => tr!(l, "High risk: {ns} warning signal(s) need prompt investigation.", "高風險：{ns} 個警示訊號需要儘快調查。"),
+        RiskLevel::Yellow => tr!(l, "Suspicious: {ns} signal(s) worth checking.", "可疑：{ns} 個訊號值得檢查。"),
+        RiskLevel::Green => tr!(l, "No risk signals in the observed traffic.", "觀測到的流量中沒有風險訊號。"),
+        RiskLevel::Gray if !inp.traffic_visible => tr!(l, "Unrated, not idle: it is online (answers ARP on the LAN), but its traffic does not pass through this Mac, so its behaviour cannot be judged.", "未評級，並非閒置：它在線上（會回應區網 ARP），但流量不經過這台 Mac，因此無法判斷其行為。"),
+        RiskLevel::Gray if !flows_seen => tr!(l, "Unrated: no connections from it in the window.", "未評級：時間窗內沒有它的連線。"),
+        RiskLevel::Gray => tr!(l, "Unrated: not enough data collected yet.", "未評級：收集的資料還不夠。"),
     };
     let actions = next_actions(d, &signals, inp, flows_seen, named || vendor_known);
+    let counts = inp
+        .traffic_visible
+        .then(|| ConnCounts::tally(inp.window_flows, now));
 
     Assessment {
         mac: d.mac,
@@ -417,7 +616,18 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
         summary,
         evidence,
         actions,
+        counts,
+        lang: l,
     }
+}
+
+fn denied_examples(flows: &[Flow]) -> String {
+    let s: BTreeSet<String> = flows
+        .iter()
+        .filter(|f| f.outcome == FlowOutcome::Denied)
+        .map(|f| format!("{}:{}", f.dst_ip, f.dst_port))
+        .collect();
+    join(&s)
 }
 
 fn next_actions(
@@ -427,51 +637,62 @@ fn next_actions(
     flows_seen: bool,
     identified: bool,
 ) -> Vec<String> {
+    let l = inp.lang;
+    let mac = d.mac;
     let mut a: Vec<String> = Vec::new();
     for s in signals {
         a.push(match s {
-            Signal::IocHit => "Isolate the device (unplug it or move it to a quarantine VLAN), block the IOC destination on the FortiGate, then find the process with `relayscan flows` and scan the host.",
-            Signal::GatewayTakeover => "Possible ARP spoofing: compare this MAC with the FortiGate's real MAC on its console. If they differ, find the switch port or Wi-Fi client and disconnect it, and enable ARP inspection.",
-            Signal::IpChurn => "Check the FortiGate DHCP log for this MAC: frequent IP changes can mean MAC spoofing or a misbehaving client.",
-            Signal::MultiSourceReports => "Look up the reported destination (AbuseIPDB/OTX) and block it if the connection is not expected.",
-            Signal::Beaconing => "Periodic connections: identify the process and confirm it is a legitimate updater or heartbeat. Otherwise treat it as possible C2.",
-            Signal::BaselineDeviation => "New destinations compared with the baseline: confirm that a recent install or update explains them.",
-            Signal::LargeEgress => "Large upload: confirm it is an expected backup or sync.",
+            Signal::IocHit => tr!(l, "Isolate the device (unplug it or move it to a quarantine VLAN), block the IOC destination on the FortiGate, then find the process (`relayscan flows` on a Mac, or EDR) and scan the host.", "隔離此裝置（拔線或移到隔離 VLAN），在 FortiGate 封鎖該 IOC 目的地，接著找出對應程序（Mac 上用 `relayscan flows`，或用 EDR）並掃描主機。"),
+            Signal::GatewayTakeover => tr!(l, "Possible ARP spoofing: compare this MAC with the FortiGate's real MAC on its console. If they differ, find the switch port or Wi-Fi client and disconnect it, and enable ARP inspection.", "可能遭 ARP 欺騙：在 FortiGate 主控台比對其真實 MAC。若不同，找出對應的交換器埠或 Wi-Fi 用戶端並中斷連線，並啟用 ARP 檢查。"),
+            Signal::IpChurn => tr!(l, "Check the FortiGate DHCP log for this MAC: frequent IP changes can mean MAC spoofing or a misbehaving client.", "查看 FortiGate 對此 MAC 的 DHCP 紀錄：IP 頻繁變動可能代表 MAC 偽造或用戶端異常。"),
+            Signal::MultiSourceReports => tr!(l, "Look up the reported destination (AbuseIPDB/OTX) and block it if the connection is not expected.", "查詢被回報的目的地（AbuseIPDB/OTX），若連線非預期就封鎖它。"),
+            Signal::Beaconing => tr!(l, "Periodic connections: identify the process and confirm it is a legitimate updater or heartbeat. Otherwise treat it as possible C2.", "週期性連線：找出程序並確認是合法的更新或心跳；否則視為可能的 C2。"),
+            Signal::LanScan => tr!(l, "It is probing many LAN hosts: find out what runs on it (inventory/backup tools scan legitimately). If unexplained, quarantine it and check it for malware.", "它正在探測許多區網主機：確認它上面執行什麼（盤點／備份工具也會合法掃描）。若無法解釋，請隔離並檢查是否中毒。"),
+            Signal::BaselineDeviation => tr!(l, "New destinations compared with the baseline: confirm that a recent install or update explains them.", "與基線相比出現新目的地：確認是否為近期安裝或更新所致。"),
+            Signal::LargeEgress => tr!(l, "Large upload: confirm it is an expected backup or sync.", "大量上傳：確認是否為預期的備份或同步。"),
+            Signal::DeniedByFirewall => tr!(l, "The FortiGate is blocking its connections: review the deny log for this source (Log & Report → Forward Traffic, filter srcip). Repeated blocked attempts to odd ports can mean malware.", "FortiGate 正在阻擋它的連線：檢視此來源的拒絕紀錄（Log & Report → Forward Traffic，篩選 srcip）。反覆嘗試連到異常埠可能代表中毒。"),
+            Signal::ConnFailures => tr!(l, "Many connections fail: a dead service it depends on, or blind scanning / an offline C2 server. Check which destinations fail.", "大量連線失敗：可能是依賴的服務失效，或是盲目掃描／離線的 C2 伺服器。請檢查哪些目的地失敗。"),
             Signal::TrustedBaseline => continue,
-        }.to_string());
+        });
     }
     if !identified {
         a.push(if d.mac_randomized {
-            format!("Identify the owner: look up {} in the FortiGate DHCP / Wi-Fi client list. Randomized MACs are normal for phones and laptops, but they hide the vendor.", d.mac)
+            tr!(l, "Identify the owner: look up {mac} in the FortiGate DHCP / Wi-Fi client list (or run `relayscan fortigate poll`, which imports DHCP hostnames). Randomized MACs are normal for phones and laptops, but they hide the vendor.", "找出擁有者：在 FortiGate DHCP／Wi-Fi 用戶端清單查詢 {mac}（或執行 `relayscan fortigate poll` 匯入 DHCP 主機名稱）。手機與筆電使用隨機化 MAC 很正常，但會隱藏廠商。")
         } else {
-            format!("Identify the device: vendor unknown. Check the FortiGate DHCP lease hostname for {}.", d.mac)
+            tr!(l, "Identify the device: vendor unknown. Check the FortiGate DHCP lease hostname for {mac}.", "識別此裝置：廠商未知。請查看 FortiGate DHCP 租約中 {mac} 的主機名稱。")
         });
     }
     if !inp.traffic_visible {
-        a.push("To rate its behaviour, its traffic must be observed: export FortiGate traffic logs or mirror the gateway port to a Zeek sensor. On a switched or Wi-Fi LAN this Mac cannot see other devices' traffic.".into());
-    } else if !flows_seen {
-        a.push(
-            "Collect this host's connections: run `relayscan watch` (or press r in the TUI)."
-                .into(),
-        );
+        a.push(if inp.sensors_active {
+            tr!(l, "A sensor is feeding traffic, but none of it is from this device: it may be on a VLAN/SSID whose policy has logging off. Enable 'Log Allowed Traffic: All Sessions' on that FortiGate policy.", "已有感測器提供流量，但沒有這台裝置的：它可能位於未開啟日誌的 VLAN／SSID。請在該 FortiGate 政策啟用「Log Allowed Traffic: All Sessions」。")
+        } else {
+            tr!(l, "To rate its behaviour, feed the gateway's view of its traffic: `relayscan syslog` + FortiGate syslog push, `relayscan import fortigate <log>`, `relayscan fortigate poll`, or a Zeek sensor on a mirror port (`relayscan import zeek conn.log --follow`). See docs/TRAFFIC-SOURCES.md. This Mac alone cannot see other devices' traffic on a switched/Wi-Fi LAN.", "要評估它的行為，需要匯入閘道看到的流量：`relayscan syslog` 搭配 FortiGate syslog 推送、`relayscan import fortigate <日誌>`、`relayscan fortigate poll`，或在鏡像埠架設 Zeek（`relayscan import zeek conn.log --follow`）。詳見 docs/TRAFFIC-SOURCES.md。在交換式／Wi-Fi 區網中，這台 Mac 本身看不到其他裝置的流量。")
+        });
+    } else if !flows_seen && !inp.sensors_active {
+        a.push(tr!(
+            l,
+            "Collect this host's connections: run `relayscan watch` (or press r in the TUI).",
+            "收集本機連線：執行 `relayscan watch`（或在 TUI 按 r）。"
+        ));
     }
     match d.device_type {
-        DeviceType::Camera | DeviceType::Iot => a.push(
-            "IoT/camera hygiene: change the default password, update the firmware, and isolate it on an IoT VLAN.".into(),
-        ),
-        DeviceType::Router => a.push(
-            "Gateway: keep FortiOS patched. Its traffic logs are the best source for rating every other device.".into(),
-        ),
+        DeviceType::Camera | DeviceType::Iot => a.push(tr!(l, "IoT/camera hygiene: change the default password, update the firmware, and isolate it on an IoT VLAN.", "IoT／攝影機防護：更改預設密碼、更新韌體，並隔離到 IoT VLAN。")),
+        DeviceType::Router => a.push(if inp.sensors_active {
+            tr!(l, "Gateway: traffic logs are being ingested ✔. Keep FortiOS patched.", "閘道：流量日誌已在匯入 ✔。請持續更新 FortiOS。")
+        } else {
+            tr!(l, "Gateway: keep FortiOS patched. Its traffic logs are the best source for rating every other device: see docs/TRAFFIC-SOURCES.md.", "閘道：請持續更新 FortiOS。它的流量日誌是評估其他所有裝置的最佳來源：詳見 docs/TRAFFIC-SOURCES.md。")
+        }),
         _ => {}
     }
     if !d.acknowledged {
-        a.push(format!(
-            "If this device is expected here, acknowledge it (press a, or `relayscan ack {}`).",
-            d.mac
+        a.push(tr!(
+            l,
+            "If this device is expected here, acknowledge it (press a, or `relayscan ack {mac}`).",
+            "若這台裝置本來就該在這裡，請確認它（按 a，或 `relayscan ack {mac}`）。"
         ));
     }
     if !d.trusted && identified && signals.is_empty() {
-        a.push("If you recognise it, mark it trusted (press t). That raises confidence, and it gets −15 while it matches its baseline.".into());
+        a.push(tr!(l, "If you recognise it, mark it trusted (press t). That raises confidence, and it gets −15 while it matches its baseline.", "若你認得它，請標記為信任（按 t）。這會提高信心度，且行為符合基線時分數 −15。"));
     }
     a
 }
@@ -587,12 +808,12 @@ fn baseline_deviation(cfg: &RiskConfig, inp: &Inputs) -> Option<String> {
         .collect();
     let ratio = new.len() as f64 / recent.len() as f64;
     (new.len() >= cfg.baseline_min_new && ratio >= cfg.baseline_min_new_ratio).then(|| {
-        format!(
-            "{} of {} destinations are new vs baseline ({:.0}%), e.g. {}",
-            new.len(),
-            recent.len(),
-            ratio * 100.0,
-            new.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+        let (n, r, pct) = (new.len(), recent.len(), ratio * 100.0);
+        let eg = new.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        tr!(
+            inp.lang,
+            "{n} of {r} destinations are new vs baseline ({pct:.0}%), e.g. {eg}",
+            "{r} 個目的地中有 {n} 個是基線外的新目的地（{pct:.0}%），例如 {eg}"
         )
     })
 }
@@ -682,6 +903,8 @@ mod tests {
         window: Vec<Flow>,
         base: Vec<Flow>,
         verdicts: HashMap<IpAddr, Vec<Verdict>>,
+        sensors: bool,
+        lang: Lang,
     }
 
     impl Case {
@@ -693,6 +916,8 @@ mod tests {
                 window: vec![],
                 base: vec![],
                 verdicts: HashMap::new(),
+                sensors: false,
+                lang: Lang::En,
             }
         }
         fn run(&self) -> Assessment {
@@ -710,7 +935,9 @@ mod tests {
                     verdicts: &self.verdicts,
                     ti_checked: true,
                     traffic_visible: true,
+                    sensors_active: self.sensors,
                     is_on_link: &on_link,
+                    lang: self.lang,
                 },
                 Utc::now(),
             )
@@ -917,7 +1144,9 @@ mod tests {
                 verdicts: &v,
                 ti_checked: true,
                 traffic_visible: false,
+                sensors_active: false,
                 is_on_link: &on_link,
+                lang: Lang::En,
             },
             Utc::now(),
         );
@@ -963,5 +1192,79 @@ mod tests {
         assert_eq!(level_for(20), RiskLevel::Yellow);
         assert_eq!(level_for(50), RiskLevel::Orange);
         assert_eq!(level_for(80), RiskLevel::Red);
+    }
+
+    fn sensor_flow(dst: &str, port: u16, at: DateTime<Utc>, outcome: FlowOutcome) -> Flow {
+        Flow {
+            origin: FlowOrigin::Fortigate,
+            outcome,
+            process: Some("HTTPS".into()),
+            src_ip: "192.168.50.13".parse().unwrap(),
+            ..flow(dst, port, at, 100)
+        }
+    }
+
+    #[test]
+    fn sensor_fed_device_is_rated_with_counts() {
+        let mut c = Case::new(device(false, true));
+        c.sensors = true;
+        let now = Utc::now();
+        c.window = (0..4)
+            .map(|i| sensor_flow(&format!("198.51.100.{i}"), 443, now, FlowOutcome::Closed))
+            .collect();
+        c.window
+            .push(sensor_flow("198.51.100.9", 443, now, FlowOutcome::Active));
+        let a = c.run();
+        assert_ne!(a.level, RiskLevel::Gray, "traffic visible via FortiGate");
+        let tv = a
+            .evidence
+            .iter()
+            .find(|e| e.key == "Traffic visible")
+            .unwrap();
+        assert!(tv.present && tv.note.contains("FortiGate"), "{}", tv.note);
+        let n = a.counts.unwrap();
+        assert_eq!((n.active, n.closed, n.other()), (1, 4, 0));
+    }
+
+    #[test]
+    fn lan_scan_and_denies_fire() {
+        let mut c = Case::new(device(false, true));
+        let now = Utc::now();
+        c.window = (1..=25)
+            .map(|i| sensor_flow(&format!("192.168.50.{i}"), 445, now, FlowOutcome::Failed))
+            .collect();
+        c.window.extend(
+            (0..6).map(|i| sensor_flow(&format!("192.0.2.{i}"), 23, now, FlowOutcome::Denied)),
+        );
+        let a = c.run();
+        let s = signals(&a);
+        assert!(s.contains(&Signal::LanScan), "{s:?}");
+        assert!(s.contains(&Signal::DeniedByFirewall));
+        assert!(s.contains(&Signal::ConnFailures));
+        assert_eq!(a.score, 55);
+        assert_eq!(a.level, RiskLevel::Orange);
+        assert!(a.actions[0].contains("LAN hosts"), "{}", a.actions[0]);
+        assert_eq!(a.counts.unwrap().other(), 31);
+    }
+
+    #[test]
+    fn traditional_chinese_output() {
+        let mut c = Case::new(device(false, false));
+        c.lang = Lang::ZhTw;
+        c.window = vec![flow("162.243.103.246", 443, Utc::now(), 10)];
+        c.verdicts.insert(
+            "162.243.103.246".parse().unwrap(),
+            vec![verdict("162.243.103.246", "feodo", true, 0.95, None)],
+        );
+        let a = c.run();
+        assert_eq!(a.level, RiskLevel::Red);
+        assert!(a.summary.contains("立即處理"), "{}", a.summary);
+        assert!(a.reasons[0].detail.starts_with("目的地命中惡意 IOC"));
+        assert!(a.actions[0].starts_with("隔離此裝置"));
+        assert!(a
+            .evidence
+            .iter()
+            .any(|e| e.factor == "流量可見" && e.key == "Traffic visible"));
+        assert_eq!(a.lang, Lang::ZhTw);
     }
 }

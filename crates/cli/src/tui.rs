@@ -1,7 +1,10 @@
 //! Kaspersky-style two-pane TUI: device list (status dot, name, vendor, NEW,
-//! risk badge) on the left, details + reasons + flows on the right.
+//! risk badge, connection counts) on the left; details, reasons, confidence,
+//! next steps and timestamped connections on the right. `L` switches
+//! English / 繁體中文.
 
-use crate::assess::{assess_all, Opts};
+use crate::assess::{assess_all, counts_line, Opts};
+use crate::table::pad;
 use anyhow::Result;
 use chrono::{Duration, Local, Utc};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -13,9 +16,11 @@ use ratatui::{DefaultTerminal, Frame};
 use relay_collect::netinfo::{self, NetInfo};
 use relay_core::risk::{Assessment, RiskConfig};
 use relay_core::store::Flag;
-use relay_core::{ConnectionStatus, Device, Flow, RiskLevel, Store};
+use relay_core::{i18n, tr};
+use relay_core::{ConnectionStatus, Device, Flow, FlowOutcome, Lang, Mac, RiskLevel, Store};
 use relay_intel::ti::Intel;
 use relay_intel::OuiDb;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -34,12 +39,13 @@ pub struct Args {
 
 pub struct App {
     pub rows: Vec<(Device, Assessment)>,
-    pub flows: Vec<Flow>,
-    pub self_ip: Option<IpAddr>,
+    /// Attributed flows per device, newest first.
+    pub flows: HashMap<Mac, Vec<Flow>>,
     pub state: ListState,
     pub show_offline: bool,
     pub status: String,
     pub detail_scroll: u16,
+    pub lang: Lang,
 }
 
 impl App {
@@ -76,36 +82,52 @@ fn level_color(l: RiskLevel) -> Color {
     }
 }
 
+fn outcome_color(o: FlowOutcome) -> Color {
+    match o {
+        FlowOutcome::Active => Color::Green,
+        FlowOutcome::Closed => Color::Gray,
+        FlowOutcome::Failed => Color::Yellow,
+        FlowOutcome::Denied => Color::Red,
+    }
+}
+
+fn outcome_label(l: Lang, o: FlowOutcome) -> String {
+    match o {
+        FlowOutcome::Active => tr!(l, "connecting", "連線中"),
+        FlowOutcome::Closed => tr!(l, "disconnected", "已中斷"),
+        FlowOutcome::Failed => tr!(l, "failed", "失敗"),
+        FlowOutcome::Denied => tr!(l, "denied", "被阻擋"),
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let l = app.lang;
     let [main, footer] =
         Layout::vertical([Constraint::Min(5), Constraint::Length(1)]).areas(f.area());
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(main);
     draw_list(f, app, left);
     draw_detail(f, app, right);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            " ↑↓/jk ".bold(),
-            "move  ".into(),
-            "J/K ".bold(),
-            "scroll details  ".into(),
-            "a ".bold(),
-            "ack  ".into(),
-            "t ".bold(),
-            "trust  ".into(),
-            "o ".bold(),
-            "offline  ".into(),
-            "r ".bold(),
-            "rescan  ".into(),
-            "q ".bold(),
-            "quit   ".into(),
-            Span::raw(app.status.clone()).dim(),
-        ])),
-        footer,
-    );
+    let key = |k: &str, v: String| vec![Span::raw(format!(" {k} ")).bold(), Span::raw(v)];
+    let mut spans = Vec::new();
+    for (k, v) in [
+        ("↑↓/jk", tr!(l, "move", "移動")),
+        ("J/K", tr!(l, "scroll details", "捲動詳細資訊")),
+        ("a", tr!(l, "ack", "確認")),
+        ("t", tr!(l, "trust", "信任")),
+        ("o", tr!(l, "offline", "離線裝置")),
+        ("r", tr!(l, "rescan", "重新掃描")),
+        ("L", tr!(l, "中文", "English")),
+        ("q", tr!(l, "quit", "離開")),
+    ] {
+        spans.extend(key(k, v));
+    }
+    spans.push(Span::raw(format!("  {}", app.status)).dim());
+    f.render_widget(Paragraph::new(Line::from(spans)), footer);
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let l = app.lang;
     let vis = app.visible();
     let online = vis
         .iter()
@@ -119,45 +141,63 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 ConnectionStatus::Offline => "●".fg(Color::DarkGray),
             };
             let new = if d.acknowledged {
-                "   ".into()
+                Span::raw(pad("", 6))
             } else {
-                "NEW".fg(Color::Rgb(255, 140, 0)).bold()
+                Span::raw(pad(&tr!(l, "NEW", "新裝置"), 6))
+                    .fg(Color::Rgb(255, 140, 0))
+                    .bold()
             };
-            let badge = format!(" {:<6}", format!("{:?}", a.level))
+            let badge = Span::raw(format!(" {}", i18n::level_short(l, a.level)))
                 .fg(level_color(a.level))
                 .bold();
+            let conns = match &a.counts {
+                Some(c) => vec![
+                    Span::raw(format!("  ▲{}", c.active)).fg(Color::Green),
+                    Span::raw(format!(" ●{}", c.closed)).fg(Color::Gray),
+                    Span::raw(format!(" ✕{}", c.other())).fg(if c.other() > 0 {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    }),
+                ],
+                None => vec![Span::raw(format!("  {}", tr!(l, "conn n/a", "連線 不適用"))).dim()],
+            };
+            let ip = d
+                .ips
+                .iter()
+                .find(|i| i.is_ipv4())
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            let mut row2 = vec![
+                "  ".into(),
+                Span::raw(format!(
+                    "{} {}",
+                    pad(&ip, 15),
+                    pad(&i18n::vendor_label(l, d), 22)
+                ))
+                .dim(),
+            ];
+            row2.extend(conns);
             ListItem::new(vec![
                 Line::from(vec![
                     dot,
                     " ".into(),
-                    Span::raw(format!(
-                        "{:<28}",
-                        crate::table::trunc(&d.display_name(), 28)
-                    ))
-                    .bold(),
+                    Span::raw(pad(&i18n::display_name(l, d), 28)).bold(),
                     new,
                     badge,
                 ]),
-                Line::from(vec![
-                    "  ".into(),
-                    Span::raw(format!(
-                        "{:<15} {}",
-                        d.ips
-                            .iter()
-                            .find(|i| i.is_ipv4())
-                            .map(|i| i.to_string())
-                            .unwrap_or_default(),
-                        d.vendor_label()
-                    ))
-                    .dim(),
-                ]),
+                Line::from(row2),
             ])
         })
         .collect();
+    let n = vis.len();
+    let title = tr!(
+        l,
+        " Devices — {online} online / {n} shown ",
+        " 裝置 — {online} 台在線／顯示 {n} 台 "
+    );
     let list = List::new(items)
-        .block(
-            Block::bordered().title(format!(" Devices — {online} online / {} shown ", vis.len())),
-        )
+        .block(Block::bordered().title(title))
         .highlight_style(
             Style::default()
                 .bg(Color::Rgb(40, 90, 200))
@@ -167,44 +207,49 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::bordered().title(" Details ");
+    let l = app.lang;
+    let block = Block::bordered().title(tr!(l, " Details ", " 詳細資訊 "));
     let Some((d, a)) = app.selected() else {
         f.render_widget(
-            Paragraph::new("No devices yet — run `relayscan discover --active`.").block(block),
+            Paragraph::new(tr!(
+                l,
+                "No devices yet — run `relayscan discover --active`.",
+                "尚無裝置 — 請執行 `relayscan discover --active`。"
+            ))
+            .block(block),
             area,
         );
         return;
     };
-    let kv = |k: &str, v: String| {
-        Line::from(vec![
-            Span::raw(format!("{k:<13}")).dim(),
-            Span::raw(v).bold(),
-        ])
-    };
+    let kv =
+        |k: String, v: String| Line::from(vec![Span::raw(pad(&k, 14)).dim(), Span::raw(v).bold()]);
     let mut lines = vec![
         Line::from(vec![
             if d.acknowledged {
                 "".into()
             } else {
-                " NEW DEVICE "
+                Span::raw(tr!(l, " NEW DEVICE ", " 新裝置 "))
                     .bg(Color::Rgb(255, 140, 0))
                     .fg(Color::White)
                     .bold()
             },
             " ".into(),
-            Span::raw(d.display_name()).bold(),
+            Span::raw(i18n::display_name(l, d)).bold(),
         ]),
         Line::from(""),
         kv(
-            "Last seen:",
+            tr!(l, "Last seen:", "最後上線："),
             d.last_seen
                 .with_timezone(&Local)
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string(),
         ),
-        kv("Status:", format!("{:?}", d.connection_status)),
         kv(
-            "IP address:",
+            tr!(l, "Status:", "狀態："),
+            i18n::status(l, d.connection_status),
+        ),
+        kv(
+            tr!(l, "IP address:", "IP 位址："),
             d.ips
                 .iter()
                 .map(|i| i.to_string())
@@ -212,41 +257,60 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 .join(", "),
         ),
         kv(
-            "MAC address:",
+            tr!(l, "MAC address:", "MAC 位址："),
             format!(
                 "{}{}",
                 d.mac,
                 if d.mac_randomized {
-                    "  (randomized)"
+                    tr!(l, "  (randomized)", "（隨機化）")
                 } else {
-                    ""
+                    String::new()
                 }
             ),
         ),
-        kv("Vendor:", d.vendor_label()),
-        kv("Type:", d.device_type.as_str().to_string()),
+        kv(tr!(l, "Vendor:", "廠商："), i18n::vendor_label(l, d)),
         kv(
-            "Trusted:",
-            if d.trusted { "yes".into() } else { "no".into() },
+            tr!(l, "Type:", "類型："),
+            i18n::device_type(l, d.device_type),
+        ),
+        kv(
+            tr!(l, "Trusted:", "信任："),
+            if d.trusted {
+                tr!(l, "yes", "是")
+            } else {
+                tr!(l, "no", "否")
+            },
         ),
         Line::from(""),
         Line::from(vec![
-            Span::raw(format!("{:<13}", "Risk:")).dim(),
-            Span::raw(format!(" {:?} ", a.level))
+            Span::raw(pad(&tr!(l, "Risk:", "風險："), 14)).dim(),
+            Span::raw(format!(" {} ", i18n::level(l, a.level)))
                 .bg(level_color(a.level))
                 .fg(Color::Black)
                 .bold(),
             Span::raw(format!(
-                "  score {}  confidence {:.0}%",
+                "  {} {}  {} {:.0}%",
+                tr!(l, "score", "分數"),
                 a.score,
+                tr!(l, "confidence", "信心度"),
                 a.confidence * 100.0
             )),
         ]),
     ];
     lines.push(Line::from(Span::raw(format!("  {}", a.summary)).italic()));
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        tr!(l, "Connections (last 60 min)", "連線數（最近 60 分鐘）").dim(),
+    ));
+    lines.push(Line::from(format!(
+        "  {}",
+        counts_line(l, a.counts.as_ref())
+    )));
     if !a.reasons.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("Why this score".dim()));
+        lines.push(Line::from(
+            tr!(l, "Why this score", "為什麼是這個分數").dim(),
+        ));
     }
     for r in &a.reasons {
         lines.push(Line::from(vec![
@@ -260,8 +324,14 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     }
     if !a.evidence.is_empty() {
         lines.push(Line::from(""));
+        let pct = a.confidence * 100.0;
         lines.push(Line::from(
-            format!("Confidence {:.0}% — built from", a.confidence * 100.0).dim(),
+            tr!(
+                l,
+                "Confidence {pct:.0}% — built from",
+                "信心度 {pct:.0}% — 構成如下"
+            )
+            .dim(),
         ));
         for e in &a.evidence {
             let (mark, col) = if e.present {
@@ -271,7 +341,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             };
             lines.push(Line::from(vec![
                 Span::raw(format!("  {mark} ")).fg(col),
-                Span::raw(format!("{:<20}", e.factor)).bold(),
+                Span::raw(pad(&e.factor, 20)).bold(),
                 Span::raw(format!("{:>4}  ", format!("+{:.0}", e.weight * 100.0))).fg(col),
                 Span::raw(e.note.clone()).dim(),
             ]));
@@ -279,17 +349,22 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     }
     if !a.actions.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("Next steps".dim()));
+        lines.push(Line::from(tr!(l, "Next steps", "下一步").dim()));
         for (i, act) in a.actions.iter().enumerate() {
             lines.push(Line::from(format!("  {}. {act}", i + 1)));
         }
     }
-    if app.self_ip.is_some_and(|ip| d.ips.contains(&ip)) && !app.flows.is_empty() {
+    if let Some(fl) = app.flows.get(&d.mac).filter(|v| !v.is_empty()) {
         lines.push(Line::from(""));
         lines.push(Line::from(
-            "Recent connections (this host) — last seen · first seen · process → destination".dim(),
+            tr!(
+                l,
+                "Recent connections — last seen · since · app/process → destination · state",
+                "最近連線 — 最後出現 · 開始於 · 應用/程序 → 目的地 · 狀態"
+            )
+            .dim(),
         ));
-        for fl in app.flows.iter().take(12) {
+        for fl in fl.iter().take(15) {
             lines.push(Line::from(vec![
                 Span::raw(format!(
                     "  {} ",
@@ -297,18 +372,31 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 ))
                 .fg(Color::Cyan),
                 Span::raw(format!(
-                    "(since {}) ",
+                    "({} {}) ",
+                    tr!(l, "since", "自"),
                     fl.first_seen.with_timezone(&Local).format("%m-%d %H:%M")
                 ))
                 .dim(),
                 Span::raw(format!(
-                    "{:<16} → {}:{} {}",
-                    crate::table::trunc(fl.process.as_deref().unwrap_or("?"), 16),
+                    "{} → {}:{} ",
+                    pad(fl.process.as_deref().unwrap_or("?"), 16),
                     fl.dst_ip,
                     fl.dst_port,
-                    fl.state.as_deref().unwrap_or("")
                 )),
+                Span::raw(outcome_label(l, fl.outcome)).fg(outcome_color(fl.outcome)),
+                Span::raw(format!(" [{}]", fl.origin.as_str())).dim(),
             ]));
+        }
+        if fl.len() > 15 {
+            let more = fl.len() - 15;
+            lines.push(Line::from(
+                tr!(
+                    l,
+                    "  … {more} more (relayscan flows)",
+                    "  … 另有 {more} 條（relayscan flows）"
+                )
+                .dim(),
+            ));
         }
     }
     f.render_widget(
@@ -332,7 +420,7 @@ struct Ctx<'a> {
 fn reload(ctx: &mut Ctx, app: &mut App) -> Result<()> {
     let keep = app.selected().map(|(d, _)| d.mac);
     if let Some(net) = &ctx.net {
-        app.rows = assess_all(
+        let res = assess_all(
             ctx.store,
             net,
             &ctx.intel,
@@ -341,12 +429,16 @@ fn reload(ctx: &mut Ctx, app: &mut App) -> Result<()> {
                 window: Duration::minutes(60),
                 baseline: Duration::days(7),
                 offline: true,
+                lang: app.lang,
             },
             Utc::now(),
         )?;
-        app.self_ip = Some(IpAddr::V4(net.ip));
+        app.rows = res.rows;
+        app.flows = res.flows;
+        for v in app.flows.values_mut() {
+            v.sort_by_key(|f| std::cmp::Reverse(f.last_seen));
+        }
     }
-    app.flows = ctx.store.flows_since(Utc::now() - Duration::minutes(10))?;
     let vis = app.visible();
     let idx = keep
         .and_then(|m| vis.iter().position(|(d, _)| d.mac == m))
@@ -355,7 +447,7 @@ fn reload(ctx: &mut Ctx, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-pub fn run(store: &mut Store, oui: &OuiDb, args: &Args) -> Result<()> {
+pub fn run(store: &mut Store, oui: &OuiDb, args: &Args, lang: Lang) -> Result<()> {
     let mut ctx = Ctx {
         store,
         oui,
@@ -366,12 +458,12 @@ pub fn run(store: &mut Store, oui: &OuiDb, args: &Args) -> Result<()> {
     };
     let mut app = App {
         rows: vec![],
-        flows: vec![],
-        self_ip: None,
+        flows: HashMap::new(),
         state: ListState::default(),
         show_offline: false,
         status: String::new(),
         detail_scroll: 0,
+        lang,
     };
     // Capture this host's connections up front (local nettop; no network
     // calls), so the self device is rated instead of showing Gray.
@@ -415,6 +507,10 @@ fn event_loop(
                         app.show_offline = !app.show_offline;
                         app.move_by(0);
                     }
+                    KeyCode::Char('L') | KeyCode::Char('l') => {
+                        app.lang = app.lang.toggle();
+                        reload(ctx, app)?;
+                    }
                     KeyCode::Char('a') => {
                         if let Some((d, _)) = app.selected() {
                             ctx.store.set_flag(d.mac, Flag::Acknowledged, true)?;
@@ -429,7 +525,7 @@ fn event_loop(
                         }
                     }
                     KeyCode::Char('r') => {
-                        app.status = "scanning…".into();
+                        app.status = tr!(app.lang, "scanning…", "掃描中…");
                         term.draw(|f| draw(f, app))?;
                         app.status =
                             rescan(ctx).unwrap_or_else(|e| format!("rescan failed: {e:#}"));
@@ -501,7 +597,10 @@ mod tests {
                 level,
                 confidence: 0.6,
                 summary: "act now".into(),
+                counts: None,
+                lang: Lang::En,
                 evidence: vec![relay_core::risk::Evidence {
+                    key: "Traffic visible".into(),
                     factor: "Traffic visible".into(),
                     weight: 0.3,
                     present: false,
@@ -526,12 +625,12 @@ mod tests {
                 RiskLevel::Red,
                 false,
             )],
-            flows: vec![],
-            self_ip: None,
+            flows: HashMap::new(),
             state: ListState::default().with_selected(Some(0)),
             show_offline: false,
             status: String::new(),
             detail_scroll: 0,
+            lang: Lang::En,
         };
         let mut term = Terminal::new(TestBackend::new(140, 30)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -564,16 +663,91 @@ mod tests {
                 row("a", "b0:c5:54:00:00:01", RiskLevel::Red, true),
                 row("b", "b0:c5:54:00:00:02", RiskLevel::Gray, true),
             ],
-            flows: vec![],
-            self_ip: None,
+            flows: HashMap::new(),
             state: ListState::default().with_selected(Some(0)),
             show_offline: false,
             status: String::new(),
             detail_scroll: 0,
+            lang: Lang::En,
         };
         app.move_by(5);
         assert_eq!(app.state.selected(), Some(1));
         app.move_by(-9);
         assert_eq!(app.state.selected(), Some(0));
+    }
+
+    #[test]
+    fn renders_traditional_chinese_with_counts_and_timestamps() {
+        let (d, mut a) = row("DCS-8525LH", "b0:c5:54:00:00:01", RiskLevel::Red, false);
+        a.evidence[0].factor = "流量可見".into();
+        a.counts = Some(relay_core::ConnCounts {
+            active: 2,
+            closed: 5,
+            failed: 1,
+            ..Default::default()
+        });
+        let t = Utc::now();
+        let flow = Flow {
+            first_seen: t,
+            last_seen: t,
+            pid: None,
+            process: Some("HTTPS".into()),
+            proto: relay_core::Proto::Tcp,
+            src_ip: "192.168.50.184".parse().unwrap(),
+            src_port: 1,
+            dst_ip: "198.51.100.7".parse().unwrap(),
+            dst_port: 443,
+            dst_mac: None,
+            state: None,
+            bytes_in: None,
+            bytes_out: None,
+            origin: relay_core::FlowOrigin::Fortigate,
+            src_mac: None,
+            outcome: FlowOutcome::Closed,
+        };
+        let mut app = App {
+            flows: HashMap::from([(d.mac, vec![flow])]),
+            rows: vec![(d, a)],
+            state: ListState::default().with_selected(Some(0)),
+            show_offline: false,
+            status: String::new(),
+            detail_scroll: 0,
+            lang: Lang::ZhTw,
+        };
+        let mut term = Terminal::new(TestBackend::new(170, 60)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let text = screen_text(&term);
+        let hhmmss = t.with_timezone(&Local).format("%H:%M:%S").to_string();
+        for needle in [
+            "裝置 — 1 台在線",
+            "新裝置",
+            "信心度",
+            "下一步",
+            "▲2",
+            "●5",
+            "✕1",
+            "最近連線",
+            "已中斷",
+            "198.51.100.7:443",
+            hhmmss.as_str(),
+        ] {
+            assert!(text.contains(needle), "missing {needle:?}");
+        }
+    }
+
+    /// Wide (CJK) glyphs occupy two cells and the second cell holds a blank,
+    /// so skip it to read the buffer as text.
+    fn screen_text(term: &Terminal<TestBackend>) -> String {
+        let mut text = String::new();
+        let mut skip = 0;
+        for c in term.backend().buffer().content() {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            text.push_str(c.symbol());
+            skip = crate::table::width(c.symbol()).saturating_sub(1);
+        }
+        text
     }
 }
