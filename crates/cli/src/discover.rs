@@ -22,6 +22,17 @@ pub struct Args {
     pace_ms: u64,
 }
 
+impl Args {
+    pub fn new(active: bool, iface: Option<String>) -> Self {
+        Self {
+            active,
+            iface,
+            listen: 4,
+            pace_ms: 4,
+        }
+    }
+}
+
 pub fn run(store: &mut Store, oui: &OuiDb, args: &Args) -> Result<()> {
     let net = netinfo::detect(args.iface.as_deref())?;
     eprintln!(

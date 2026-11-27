@@ -2,7 +2,9 @@
 
 mod compare;
 mod discover;
+mod flows;
 mod table;
+mod watch;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -27,6 +29,15 @@ struct Cli {
 enum Cmd {
     /// Run one discovery pass and store the results.
     Discover(discover::Args),
+    /// Continuously discover devices and snapshot flows.
+    Watch(watch::Args),
+    /// Show this host's connections per process and destination.
+    Flows {
+        #[command(flatten)]
+        args: flows::Args,
+        #[arg(long)]
+        iface: Option<String>,
+    },
     /// List known devices.
     Devices {
         #[arg(long)]
@@ -84,6 +95,11 @@ fn main() -> Result<()> {
     let mut store = Store::open(db_path(&cli)?)?;
     match &cli.cmd {
         Cmd::Discover(args) => discover::run(&mut store, &load_oui(&cli), args),
+        Cmd::Watch(args) => watch::run(&mut store, &load_oui(&cli), args),
+        Cmd::Flows { args, iface } => {
+            let net = relay_collect::netinfo::detect(iface.as_deref())?;
+            flows::run(&mut store, &net, args)
+        }
         Cmd::Devices { json, all } => {
             let devs: Vec<_> = store
                 .devices()?

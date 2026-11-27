@@ -37,7 +37,7 @@ pub fn print_devices(devs: &[Device]) {
     );
 }
 
-fn trunc(s: &str, n: usize) -> String {
+pub fn trunc(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
     } else {
