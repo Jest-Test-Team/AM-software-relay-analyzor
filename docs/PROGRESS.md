@@ -170,3 +170,52 @@ Triggered by TUI screenshots showing every device as Gray with an unexplained co
 - `relayscan assess --explain [--mac …]` prints the same information in the CLI.
 
 Why online devices show no traffic: "Online" means the device answered ARP on the LAN. Its own connections go straight to the FortiGate. On a switched or Wi-Fi network this Mac only receives its own unicast traffic plus broadcast and multicast, so other devices' flows are invisible here. Rating them needs FortiGate traffic logs (next adapter: backlog B5) or a mirror-port sensor.
+
+## Iteration 3: timestamps, network sensors, connection counts, zh-TW (2026-11-27)
+
+The user asked for four things:
+1. timestamps on "Recent connections";
+2. a way to get other devices' traffic, analyse it, and score it with next steps;
+3. per-device connection counts: connecting / disconnected (last seen) / other;
+4. a Traditional Chinese UI.
+
+### Alignment check against the plan
+
+| Plan item | Delivered | Notes |
+|---|---|---|
+| E: timestamps | ✔ | TUI shows last-seen `HH:MM:SS`, "since" and an outcome per connection, for **any** device with flows, tagged `[nettop/fortigate/zeek]`. `relayscan flows` has FIRST SEEN / LAST columns sorted newest first. This also fixed the J/K scroll, which was never applied. |
+| A: schema v3 | ✔ | `Flow.origin/src_mac/outcome` and `ConnCounts::tally`. The v2→v3 migration keeps existing rows (tested; ran on the live DB). |
+| B: sensors | ✔ | FortiGate key=value (syslog prefix, tz, eventtime s/ms/µs/ns), FortiGate REST (sessions in both 6.x and 7.x shapes, DHCP, vanished sessions → closed), Zeek conn.log in TSV and JSON. CLI: `import fortigate`, `import zeek [--follow]`, `syslog`, `fortigate poll`. Verified live: import plus UDP syslog via `nc`. |
+| C: rate every device | ✔ | Attribution: nettop → self; sensor srcmac; otherwise the IP binding closest in time. New signals LanScan +30, DeniedByFirewall +15, ConnFailures +10. Evidence and next steps now name the exact `relayscan` command. FortiGate `srcname` and DHCP hostnames fill device names (backlog B1). |
+| D: counts | ✔ | List row `▲active ●closed ✕other`, or `conn n/a` when not observable. Detail adds the last close time and a failed/denied/stale split. Also shown in the assess table, `--explain` and JSON. |
+| F: zh-TW | ✔ | See the deviation note below. |
+| G: docs | ✔ | `docs/TRAFFIC-SOURCES.md` (EN + 繁中), README, `risk.example.toml`. |
+
+### Deviations
+- **i18n mechanism:** a `tr!(lang, "en", "中文", …)` macro replaces the planned `Key` enum catalogue. Both strings sit at each call site, so a missing translation is still a compile error, with far less boilerplate.
+- **FortiGate REST transport:** it uses `curl` with the token sent on stdin, not ureq. This keeps the token out of `ps` and gives `-k` for self-signed certificates without adding a TLS dependency.
+- **Flow uniqueness key:** no separate key including `origin`. If FortiGate and Zeek report the same 5-tuple, the two reports merge into one row; the outcome and src_mac update, and the first origin is kept.
+- **Commit granularity:** tasks C, D and F share one commit (43ab5d5) because they touch the same strings. The schema v3 and parser work were committed from the working tree by the user's own "asalc" commits (be3ff79..ab355e0), so those changes have no task-specific commit messages.
+- **Still English:**
+  - `--help` text from clap;
+  - `intel`, `compare` and `kaspersky` output;
+  - `flows` column headers.
+
+  The user-facing TUI, `assess`, `devices`, `discover`, `import` and ack/trust output are all bilingual.
+
+### Verification
+- **Automated:** `cargo fmt`; `clippy -D warnings`, both with and without `--features relayscan/kaspersky`. 61 tests pass (collect 18, core 30, intel 6, cli 7). New tests cover:
+  - parsers;
+  - `ConnCounts`;
+  - schema migration;
+  - a sensor-fed device getting rated, and LanScan/Denied/ConnFailures firing;
+  - zh-TW risk output;
+  - `Lang::detect` precedence;
+  - CJK width;
+  - a zh-TW TUI render with counts and timestamps;
+  - end-to-end `assess_all` from FortiGate lines, including IP-only attribution.
+- **Live:**
+  - fixture import gives rated devices in `assess --lang zh-TW`;
+  - syslog over UDP was received;
+  - `RELAYSCAN_LANG=zh-TW relayscan tui` on the real LAN renders Chinese labels, counts and timestamped connections.
+- **Not verified:** a real FortiGate or Zeek feed. That needs gateway admin access, so the user sets it up following TRAFFIC-SOURCES.md.

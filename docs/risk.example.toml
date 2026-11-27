@@ -8,6 +8,9 @@ w_beaconing = 35
 w_baseline_deviation = 20
 w_large_egress = 25
 w_trusted_baseline = -15
+w_denied_by_firewall = 15   # sensor data: FortiGate action=deny
+w_conn_failures = 10        # many unanswered / reset connections
+w_lan_scan = 30             # contacts many LAN hosts or host:port pairs
 
 ioc_min_confidence = 0.75
 ip_churn_threshold = 3
@@ -22,4 +25,9 @@ baseline_min_new = 5
 baseline_min_new_ratio = 0.5
 baseline_min_span_hours = 24
 egress_bytes_threshold = 524288000
+denied_min = 5
+failures_min = 10
+failures_min_ratio = 0.3
+lan_scan_min_hosts = 20
+lan_scan_min_ports = 50
 gray_below_confidence = 0.5
