@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 relay-core.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
