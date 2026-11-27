@@ -96,6 +96,10 @@ pub enum Source {
     Ssdp,
     ReverseDns,
     Kaspersky,
+    /// FortiGate traffic log / syslog / REST API (session or DHCP table).
+    Fortigate,
+    /// Zeek conn.log.
+    Zeek,
 }
 
 /// One raw sighting produced by a collector. Collectors never write devices

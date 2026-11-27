@@ -1,0 +1,10 @@
+#separator \x09
+#set_separator	,
+#path	conn
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	service	duration	orig_bytes	resp_bytes	conn_state	orig_l2_addr	resp_l2_addr
+#types	time	string	addr	port	addr	port	enum	string	interval	count	count	string	string	string
+1795759501.100000	C1	192.168.50.13	51515	198.51.100.7	443	tcp	ssl	2.500000	1200	4800	SF	5a:37:28:13:4c:74	00:09:0f:00:00:01
+1795759502.000000	C2	192.168.50.29	40000	192.168.50.40	23	tcp	-	-	-	-	S0	98:da:c4:00:00:29	-
+1795759503.000000	C3	192.168.50.5	5353	192.168.50.254	53	udp	dns	0.010000	40	80	SF	-	-
+1795759504.000000	C4	192.168.50.5	8	8.8.8.8	0	icmp	-	-	-	-	OTH	-	-
+#close	2026-11-27-14-10-00

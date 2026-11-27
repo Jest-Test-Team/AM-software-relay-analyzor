@@ -1,0 +1,2 @@
+{"ts":1795759501.1,"uid":"C1","id.orig_h":"192.168.50.13","id.orig_p":51515,"id.resp_h":"198.51.100.7","id.resp_p":443,"proto":"tcp","service":"ssl","duration":2.5,"orig_bytes":1200,"resp_bytes":4800,"conn_state":"SF","orig_l2_addr":"5a:37:28:13:4c:74"}
+{"ts":1795759502.0,"uid":"C2","id.orig_h":"192.168.50.29","id.orig_p":40000,"id.resp_h":"192.168.50.41","id.resp_p":22,"proto":"tcp","conn_state":"REJ","orig_l2_addr":"98:da:c4:00:00:29"}
