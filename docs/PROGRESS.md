@@ -8,7 +8,7 @@ Plan: [PLAN.md](PLAN.md)
 | P1 Flows | ✅ done | nettop collector, `flows`, `watch` |
 | P2 Threat intel | ✅ done | offline Feodo + Spamhaus DROP; keyed ThreatFox + AbuseIPDB |
 | P3 Baseline & risk | ✅ done | `assess`; synthetic IOC test → Red |
-| P4 TUI | todo | |
+| P4 TUI | ✅ done | `relayscan tui` |
 | P5 Kaspersky adapter | blocked on user spike | |
 
 ## P0 — alignment check (2026-11-27)
@@ -96,3 +96,22 @@ Design decisions made during P3:
 Verification:
 - Unit test: a synthetic flow from this host to Feodo C2 `162.243.103.246` makes the self device **Red**, with "(feodo: botnet_cc)" in the reason. A second MAC that claims the gateway IP scores **45 (Yellow)**. The original gateway gets no penalty, and the other hosts stay **Gray**.
 - Live: this Mac is Green (score 0, confidence 90%) and the other 92 online devices are Gray.
+
+## P4 — alignment check (2026-11-27)
+
+| Plan item | Status |
+|---|---|
+| Device list on the left, detail pane on the right (Kaspersky layout) | ✅ |
+| Each row: status dot (green/gray) and risk badge (G/Y/O/R/Gray) with a NEW flag | ✅ The badge shows the level name in its colour. A second line shows the IP and vendor. |
+| Detail: Last seen, IP, MAC (+randomized), vendor, type, score, reasons, recent flows | ✅ Also shows Trusted and confidence. Flows appear only on this host's own row. |
+| `ack` / `trust` from the UI | ✅ The `a` and `t` keys. |
+
+Additions:
+- `o` toggles offline devices.
+- `r` runs a passive rescan (ARP/NDP plus a flow snapshot).
+- Auto-reloads every `--reload` seconds, so `relayscan watch` in another terminal keeps the view live.
+- Re-assessment inside the TUI always uses `offline` TI (local blocklists plus the cache). The UI loop therefore never makes network calls.
+
+Verification:
+- Unit tests use ratatui `TestBackend` to render the list and detail, and check that navigation clamps at the ends.
+- Live smoke test under a pseudo-TTY (150×40) against the real store: it rendered "Devices — 93 online", MAC, Last seen, "NEW DEVICE" and "Risk: Green", and `q` exited with status 0.
