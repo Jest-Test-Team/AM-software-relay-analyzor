@@ -31,7 +31,7 @@ fn results(v: &Value) -> Vec<&Value> {
     }
 }
 
-fn s<'a>(v: &'a Value, keys: &[&str]) -> Option<String> {
+fn s(v: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| match v.get(*k)? {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
