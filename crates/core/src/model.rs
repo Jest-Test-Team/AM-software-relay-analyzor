@@ -11,7 +11,7 @@ pub enum ConnectionStatus {
 }
 
 /// Security verdict, independent of connection status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RiskLevel {
     /// Not enough information to judge.
     Gray,

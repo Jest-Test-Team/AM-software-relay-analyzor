@@ -1,0 +1,24 @@
+# relayscan risk weights & thresholds (defaults shown). Pass with --config.
+# Weights follow ref.txt §6 and are NOT calibrated against ground truth.
+w_ioc = 100
+w_ip_churn = 35
+w_gateway_takeover = 45
+w_multi_source_reports = 40
+w_beaconing = 35
+w_baseline_deviation = 20
+w_large_egress = 25
+w_trusted_baseline = -15
+
+ioc_min_confidence = 0.75
+ip_churn_threshold = 3
+reports_min_reporters = 2
+reports_min_confidence = 0.5
+beacon_min_conns = 6
+beacon_max_cv = 0.15
+beacon_min_interval_s = 10.0
+beacon_max_interval_s = 3600.0
+baseline_min_flows = 20
+baseline_min_new = 5
+baseline_min_new_ratio = 0.5
+egress_bytes_threshold = 524288000
+gray_below_confidence = 0.5

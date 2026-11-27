@@ -1,5 +1,6 @@
 //! relayscan — vendor-neutral LAN device discovery and risk analysis.
 
+mod assess;
 mod compare;
 mod discover;
 mod flows;
@@ -41,6 +42,8 @@ enum Cmd {
     },
     /// Look up flow destinations (or --ip) in threat intelligence.
     Intel(intel::Args),
+    /// Score every device (Green/Yellow/Orange/Red/Gray) with reasons.
+    Assess(assess::Args),
     /// List known devices.
     Devices {
         #[arg(long)]
@@ -104,6 +107,7 @@ fn main() -> Result<()> {
             flows::run(&mut store, &net, args)
         }
         Cmd::Intel(args) => intel::run(&store, args),
+        Cmd::Assess(args) => assess::run(&store, args),
         Cmd::Devices { json, all } => {
             let devs: Vec<_> = store
                 .devices()?

@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS intel_hit (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (indicator, source)
 );
+CREATE TABLE IF NOT EXISTS assessment (
+    mac  TEXT PRIMARY KEY,
+    at   TEXT NOT NULL,
+    json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS event (
     id    INTEGER PRIMARY KEY,
     ts    TEXT NOT NULL,
@@ -479,6 +484,49 @@ impl Store {
             out.push(serde_json::from_str(&j?)?);
         }
         Ok(out)
+    }
+}
+
+impl Store {
+    /// Keep the latest assessment per device; log level changes as events.
+    pub fn save_assessment(&self, a: &crate::risk::Assessment) -> Result<()> {
+        let prev = self.assessment(a.mac)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO assessment (mac, at, json) VALUES (?1, ?2, ?3)",
+            params![
+                a.mac.to_string(),
+                a.at.to_rfc3339(),
+                serde_json::to_string(a)?
+            ],
+        )?;
+        if prev.as_ref().map(|p| p.level) != Some(a.level) {
+            self.conn.execute(
+                "INSERT INTO event (ts, kind, mac, detail) VALUES (?1, 'risk_level', ?2, ?3)",
+                params![
+                    a.at.to_rfc3339(),
+                    a.mac.to_string(),
+                    format!(
+                        "{:?} -> {:?} (score {})",
+                        prev.map(|p| p.level),
+                        a.level,
+                        a.score
+                    )
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn assessment(&self, mac: Mac) -> Result<Option<crate::risk::Assessment>> {
+        let j: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json FROM assessment WHERE mac=?1",
+                [mac.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(j.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 }
 
