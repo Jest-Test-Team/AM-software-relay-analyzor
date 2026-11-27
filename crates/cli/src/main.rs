@@ -7,6 +7,7 @@ mod flows;
 mod intel;
 #[cfg(feature = "kaspersky")]
 mod kaspersky;
+mod sensors;
 mod table;
 mod tui;
 mod watch;
@@ -43,6 +44,14 @@ enum Cmd {
         #[arg(long)]
         iface: Option<String>,
     },
+    /// Import other devices' traffic from a FortiGate log export or Zeek conn.log.
+    #[command(subcommand)]
+    Import(sensors::ImportCmd),
+    /// Receive FortiGate traffic logs pushed over syslog (UDP).
+    Syslog(sensors::SyslogArgs),
+    /// FortiGate REST API: poll sessions + DHCP leases.
+    #[command(subcommand)]
+    Fortigate(sensors::FortigateCmd),
     /// Look up flow destinations (or --ip) in threat intelligence.
     Intel(intel::Args),
     /// Score every device (Green/Yellow/Orange/Red/Gray) with reasons.
@@ -115,6 +124,9 @@ fn main() -> Result<()> {
             let net = relay_collect::netinfo::detect(iface.as_deref())?;
             flows::run(&mut store, &net, args)
         }
+        Cmd::Import(c) => sensors::import(&mut store, &load_oui(&cli), c),
+        Cmd::Syslog(a) => sensors::syslog(&mut store, &load_oui(&cli), a),
+        Cmd::Fortigate(c) => sensors::fortigate(&mut store, &load_oui(&cli), c),
         Cmd::Intel(args) => intel::run(&store, args),
         Cmd::Assess(args) => assess::run(&store, args),
         Cmd::Tui(args) => tui::run(&mut store, &load_oui(&cli), args),
