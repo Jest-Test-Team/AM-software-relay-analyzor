@@ -6,7 +6,7 @@ Plan: [PLAN.md](PLAN.md)
 |---|---|---|
 | P0 Discovery | ✅ done | 8/8 recall vs Kaspersky Smart Home Monitor list |
 | P1 Flows | ✅ done | nettop collector, `flows`, `watch` |
-| P2 Threat intel | todo | |
+| P2 Threat intel | ✅ done | offline Feodo + Spamhaus DROP; keyed ThreatFox + AbuseIPDB |
 | P3 Baseline & risk | todo | |
 | P4 TUI | todo | |
 | P5 Kaspersky adapter | blocked on user spike | |
@@ -55,3 +55,22 @@ Limits:
 - Flows are visible **only for this host**, as the plan expects.
 - nettop truncates process names to about 15 characters.
 - Byte counters are cumulative per connection, so P3 "large egress" must look at deltas or at per-connection totals.
+
+## P2 — alignment check (2026-11-27)
+
+| Plan item | Status |
+|---|---|
+| `IntelSource` trait | ✅ `relay_intel::ti`. |
+| 2 adapters: ThreatFox ("keyless") + AbuseIPDB | ⚠️ Both are implemented, but **ThreatFox is no longer keyless**. Since 21 Oct 2026 abuse.ch requires an Auth-Key, and the old exports now return 410 Gone. It is enabled by setting `THREATFOX_AUTH_KEY`. AbuseIPDB is enabled by setting `ABUSEIPDB_API_KEY`. |
+| SQLite cache | ✅ `intel_hit` table with a 24 h TTL. Negative answers are cached too, so a host is not queried again within the TTL. |
+| Only public dst IPs leave the host; never RFC 1918 or MACs | ✅ `is_public()` guard plus a unit test with a spy source. `--offline` turns off every remote source. |
+
+Additions beyond the plan:
+- **Offline blocklists** (Feodo Tracker C2 and Spamhaus DROP) via `scripts/fetch-feeds.sh`. These still work without keys, so the tool can flag IOCs with no account at all.
+- AbuseIPDB results are recorded as *reputation* (`malicious = false`), not as an IOC. In P3 they feed the "+40 multi-source reports" signal, never the "+100 IOC" signal.
+
+Verification:
+- `intel --ip 162.243.103.246 --ip 1.10.20.5 --ip 192.168.1.1` returns 2 IOC hits, from Feodo and DROP. The private IP is skipped for remote sources.
+- Checking the 68 live public destinations returned 0 hits.
+
+Not done (as planned): GreyNoise, OTX, VirusTotal and RIPEstat ASN. Backlog B3: ASN lookup, which the P3 "new destination ASN" baseline signal needs. Until then the baseline uses /24 (v4) and /48 (v6) prefixes as a stand-in for ASN.
