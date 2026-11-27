@@ -5,6 +5,7 @@
 
 pub mod mac;
 pub mod model;
+pub mod risk;
 pub mod store;
 
 pub use mac::Mac;
