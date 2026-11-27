@@ -69,6 +69,8 @@ pub fn run(store: &mut Store, net: &NetInfo, args: &Args) -> Result<()> {
         bytes_in: u64,
         bytes_out: u64,
         dst_mac: Option<Mac>,
+        first: Option<chrono::DateTime<Utc>>,
+        last: Option<chrono::DateTime<Utc>>,
     }
     let mut agg: BTreeMap<(String, IpAddr, u16, &str), Agg> = BTreeMap::new();
     for f in &fl {
@@ -83,14 +85,24 @@ pub fn run(store: &mut Store, net: &NetInfo, args: &Args) -> Result<()> {
         a.bytes_in += f.bytes_in.unwrap_or(0);
         a.bytes_out += f.bytes_out.unwrap_or(0);
         a.dst_mac = a.dst_mac.or(f.dst_mac);
+        a.first = Some(a.first.map_or(f.first_seen, |t| t.min(f.first_seen)));
+        a.last = Some(a.last.map_or(f.last_seen, |t| t.max(f.last_seen)));
     }
     println!(
-        "{:<24} {:<4} {:<40} {:>5} {:>6} {:>10} {:>10}  DST MAC",
-        "PROCESS", "PROTO", "DESTINATION", "PORT", "CONNS", "IN", "OUT"
+        "{:<11} {:<8} {:<24} {:<4} {:<40} {:>5} {:>6} {:>10} {:>10}  DST MAC",
+        "FIRST SEEN", "LAST", "PROCESS", "PROTO", "DESTINATION", "PORT", "CONNS", "IN", "OUT"
     );
-    for ((proc_, ip, port, proto), a) in &agg {
+    let mut rows: Vec<_> = agg.iter().collect();
+    rows.sort_by_key(|b| std::cmp::Reverse(b.1.last));
+    let local = |t: Option<chrono::DateTime<Utc>>, f: &str| {
+        t.map(|t| t.with_timezone(&chrono::Local).format(f).to_string())
+            .unwrap_or_default()
+    };
+    for ((proc_, ip, port, proto), a) in rows {
         println!(
-            "{:<24} {:<4} {:<40} {:>5} {:>6} {:>10} {:>10}  {}",
+            "{:<11} {:<8} {:<24} {:<4} {:<40} {:>5} {:>6} {:>10} {:>10}  {}",
+            local(a.first, "%m-%d %H:%M"),
+            local(a.last, "%H:%M:%S"),
             crate::table::trunc(proc_, 24),
             proto,
             ip.to_string(),

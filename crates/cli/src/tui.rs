@@ -286,21 +286,36 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     }
     if app.self_ip.is_some_and(|ip| d.ips.contains(&ip)) && !app.flows.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("Recent connections (this host)".dim()));
+        lines.push(Line::from(
+            "Recent connections (this host) — last seen · first seen · process → destination".dim(),
+        ));
         for fl in app.flows.iter().take(12) {
-            lines.push(Line::from(format!(
-                "  {:<16} → {}:{} {}",
-                crate::table::trunc(fl.process.as_deref().unwrap_or("?"), 16),
-                fl.dst_ip,
-                fl.dst_port,
-                fl.state.as_deref().unwrap_or("")
-            )));
+            lines.push(Line::from(vec![
+                Span::raw(format!(
+                    "  {} ",
+                    fl.last_seen.with_timezone(&Local).format("%H:%M:%S")
+                ))
+                .fg(Color::Cyan),
+                Span::raw(format!(
+                    "(since {}) ",
+                    fl.first_seen.with_timezone(&Local).format("%m-%d %H:%M")
+                ))
+                .dim(),
+                Span::raw(format!(
+                    "{:<16} → {}:{} {}",
+                    crate::table::trunc(fl.process.as_deref().unwrap_or("?"), 16),
+                    fl.dst_ip,
+                    fl.dst_port,
+                    fl.state.as_deref().unwrap_or("")
+                )),
+            ]));
         }
     }
     f.render_widget(
         Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((app.detail_scroll, 0)),
         area,
     );
 }
