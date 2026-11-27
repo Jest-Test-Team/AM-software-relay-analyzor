@@ -55,6 +55,22 @@ impl DeviceType {
         }
     }
 
+    /// Fallback display label (Kaspersky-style) when no name is known.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Router => "Router",
+            Self::Computer => "Computer",
+            Self::Phone => "Mobile Phone",
+            Self::Tablet => "Tablet",
+            Self::Tv => "TV",
+            Self::Speaker => "Speaker",
+            Self::Camera => "Camera",
+            Self::Printer => "Printer",
+            Self::Iot => "Smart Device",
+            Self::Unknown => "Unknown Device",
+        }
+    }
+
     pub fn parse(s: &str) -> Self {
         match s {
             "router" => Self::Router,
@@ -131,12 +147,13 @@ pub struct Device {
 }
 
 impl Device {
-    /// Best human-readable name, mirroring what Kaspersky shows.
+    /// Best human-readable name, mirroring what Kaspersky shows: a real name if
+    /// known, otherwise a label derived from the inferred type.
     pub fn display_name(&self) -> String {
         self.hostname
             .clone()
             .or_else(|| self.mdns_name.clone())
-            .unwrap_or_else(|| "Unknown Device".to_string())
+            .unwrap_or_else(|| self.device_type.label().to_string())
     }
 
     /// Vendor line; randomized MACs have no meaningful OUI.

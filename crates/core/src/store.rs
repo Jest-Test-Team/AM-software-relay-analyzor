@@ -216,7 +216,7 @@ impl Store {
                 out.push(d);
             }
         }
-        out.sort_by_key(|d| d.ips.first().map(sort_key_ip).unwrap_or(u128::MAX));
+        out.sort_by_key(|d| d.ips.iter().map(sort_key_ip).min().unwrap_or(u128::MAX));
         Ok(out)
     }
 
@@ -413,6 +413,9 @@ mod tests {
         assert_eq!(d.connection_status, ConnectionStatus::Online);
         assert_eq!(d.vendor_label(), "Randomized MAC");
         assert_eq!(d.display_name(), "Unknown Device");
+        let mut r = d.clone();
+        r.device_type = DeviceType::Router;
+        assert_eq!(r.display_name(), "Router");
     }
 
     #[test]
