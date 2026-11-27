@@ -1,10 +1,14 @@
-//! Collectors: ARP/NDP, sweep, mDNS, SSDP, flows.
+//! Collectors: ARP/NDP, sweep, mDNS, SSDP, reverse DNS, flows.
 //!
 //! Every collector is split into a pure parser (unit-tested against fixtures)
-//! and a thin function that runs the system command.
+//! and a thin function that touches the system or network.
 
 pub mod arp;
+pub mod mdns;
 pub mod netinfo;
+pub mod rdns;
+pub mod ssdp;
+pub mod sweep;
 
 use anyhow::{bail, Context, Result};
 use std::process::Command;

@@ -9,3 +9,5 @@ relay-core.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+mdns-sd = "0.22.0"
+dns-lookup = "4.0.2"
