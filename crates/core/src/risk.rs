@@ -40,6 +40,8 @@ pub struct RiskConfig {
     pub baseline_min_flows: usize,
     pub baseline_min_new: usize,
     pub baseline_min_new_ratio: f64,
+    /// The baseline must cover at least this many hours before deviation counts.
+    pub baseline_min_span_hours: i64,
     /// Bytes sent off-link within the evaluation window.
     pub egress_bytes_threshold: u64,
     /// Below this confidence (and with no positive signals) the level is Gray.
@@ -68,6 +70,7 @@ impl Default for RiskConfig {
             baseline_min_flows: 20,
             baseline_min_new: 5,
             baseline_min_new_ratio: 0.5,
+            baseline_min_span_hours: 24,
             egress_bytes_threshold: 500 * 1024 * 1024,
             gray_below_confidence: 0.5,
         }
@@ -107,6 +110,24 @@ pub struct Assessment {
     pub level: RiskLevel,
     pub confidence: f32,
     pub reasons: Vec<Reason>,
+    /// One plain-language sentence explaining the level.
+    #[serde(default)]
+    pub summary: String,
+    /// What confidence is built from — present and missing factors.
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
+    /// Suggested follow-up actions, most important first.
+    #[serde(default)]
+    pub actions: Vec<String>,
+}
+
+/// One factor of the confidence score.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Evidence {
+    pub factor: String,
+    pub weight: f32,
+    pub present: bool,
+    pub note: String,
 }
 
 /// Everything the engine needs about one device. Built by the caller.
@@ -123,6 +144,10 @@ pub struct Inputs<'a> {
     pub verdicts: &'a HashMap<IpAddr, Vec<Verdict>>,
     /// Whether flow destinations were checked against any TI source.
     pub ti_checked: bool,
+    /// True if this device's connections can be observed at all (today: only
+    /// the host running relayscan). False ⇒ Gray means "not observable",
+    /// not "idle".
+    pub traffic_visible: bool,
     pub is_on_link: &'a dyn Fn(&IpAddr) -> bool,
 }
 
@@ -246,7 +271,7 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
             format!("{} MB sent off-link in window", egress / (1024 * 1024)),
         );
     }
-    let has_baseline = inp.baseline_flows.len() >= cfg.baseline_min_flows;
+    let (has_baseline, span_h) = baseline_ready(cfg, inp.baseline_flows);
     let any_positive = reasons.iter().any(|r| r.delta > 0);
     if d.trusted && !any_positive && (has_baseline || inp.window_flows.is_empty()) {
         add(
@@ -260,26 +285,104 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
     // --- score, confidence, level ------------------------------------------
     let raw: i32 = reasons.iter().map(|r| r.delta).sum();
     let score = raw.clamp(0, 100) as u8;
-    let mut confidence: f32 = 0.0;
-    if d.hostname.is_some() || d.mdns_name.is_some() || (d.vendor.is_some() && !d.mac_randomized) {
-        confidence += 0.3;
-    }
-    if !inp.window_flows.is_empty() {
-        confidence += 0.3;
-    }
-    if inp.ti_checked && !inp.window_flows.is_empty() {
-        confidence += 0.2;
-    }
-    if has_baseline {
-        confidence += 0.1;
-    }
-    if d.trusted {
-        confidence += 0.3;
-    }
-    if inp.ip_history.len() > 1 || d.last_seen - d.first_seen > Duration::hours(1) {
-        confidence += 0.1;
-    }
-    let confidence = confidence.min(1.0);
+    let named = d.hostname.is_some() || d.mdns_name.is_some();
+    let vendor_known = d.vendor.is_some() && !d.mac_randomized;
+    let flows_seen = !inp.window_flows.is_empty();
+    let stable = inp.ip_history.len() > 1 || d.last_seen - d.first_seen > Duration::hours(1);
+    let ev = |factor: &str, weight: f32, present: bool, yes: String, no: String| Evidence {
+        factor: factor.into(),
+        weight,
+        present,
+        note: if present { yes } else { no },
+    };
+    let evidence = vec![
+        ev(
+            "Identity",
+            0.25,
+            named || vendor_known,
+            format!("{} / {}", d.display_name(), d.vendor_label()),
+            if d.mac_randomized {
+                "no name, and a randomized MAC hides the vendor".into()
+            } else {
+                "no name and vendor not in the IEEE registry".into()
+            },
+        ),
+        ev(
+            "Advertised services",
+            0.05,
+            !d.services.is_empty(),
+            d.services
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            "nothing announced via mDNS/SSDP".into(),
+        ),
+        ev(
+            "Stable presence",
+            0.1,
+            stable,
+            format!("seen since {}", d.first_seen.format("%Y-%m-%d %H:%M")),
+            "only just appeared".into(),
+        ),
+        ev(
+            "Traffic visible",
+            0.3,
+            flows_seen,
+            format!("{} connections in the window", inp.window_flows.len()),
+            if inp.traffic_visible {
+                "no connections captured yet (run `relayscan watch` or press r)".into()
+            } else if d.device_type == DeviceType::Router {
+                "it forwards everyone's traffic, but only its own logs can show that".into()
+            } else {
+                "its connections go straight to the gateway, not through this Mac".into()
+            },
+        ),
+        ev(
+            "Threat-intel check",
+            0.15,
+            inp.ti_checked && flows_seen,
+            "destinations checked against blocklists/APIs".into(),
+            if inp.traffic_visible {
+                "no destinations to check yet".into()
+            } else {
+                "not observable from this Mac".into()
+            },
+        ),
+        ev(
+            "Behaviour baseline",
+            0.1,
+            has_baseline,
+            format!(
+                "{} older connections over {span_h}h to compare against",
+                inp.baseline_flows.len()
+            ),
+            if !inp.traffic_visible {
+                "not observable from this Mac".into()
+            } else {
+                format!(
+                    "still learning: {} connections over {span_h}h (needs ≥{} over ≥{}h)",
+                    inp.baseline_flows.len(),
+                    cfg.baseline_min_flows,
+                    cfg.baseline_min_span_hours
+                )
+            },
+        ),
+        ev(
+            "Owner confirmed",
+            0.2,
+            d.trusted,
+            "marked trusted".into(),
+            "not marked trusted".into(),
+        ),
+    ];
+    let confidence: f32 = evidence
+        .iter()
+        .filter(|e| e.present)
+        .map(|e| e.weight)
+        .sum::<f32>()
+        .min(1.0);
     let positive = reasons.iter().any(|r| r.delta > 0);
     let level = if !ioc.is_empty() {
         RiskLevel::Red
@@ -288,6 +391,22 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
     } else {
         level_for(score)
     };
+
+    let signals: BTreeSet<Signal> = reasons
+        .iter()
+        .filter(|r| r.delta > 0)
+        .map(|r| r.signal)
+        .collect();
+    let summary = match level {
+        RiskLevel::Red => "Contacts known-malicious infrastructure or shows strong attack signs — act now.".to_string(),
+        RiskLevel::Orange => format!("High risk: {} warning signal(s) need prompt investigation.", signals.len()),
+        RiskLevel::Yellow => format!("Suspicious: {} signal(s) worth checking.", signals.len()),
+        RiskLevel::Green => "No risk signals in the observed traffic.".to_string(),
+        RiskLevel::Gray if !inp.traffic_visible => "Unrated, not idle: it is online (answers ARP on the LAN), but its traffic does not pass through this Mac, so its behaviour cannot be judged.".to_string(),
+        RiskLevel::Gray => "Unrated: not enough data collected yet.".to_string(),
+    };
+    let actions = next_actions(d, &signals, inp, flows_seen, named || vendor_known);
+
     Assessment {
         mac: d.mac,
         at: now,
@@ -295,7 +414,66 @@ pub fn assess(cfg: &RiskConfig, inp: &Inputs, now: DateTime<Utc>) -> Assessment 
         level,
         confidence,
         reasons,
+        summary,
+        evidence,
+        actions,
     }
+}
+
+fn next_actions(
+    d: &Device,
+    signals: &BTreeSet<Signal>,
+    inp: &Inputs,
+    flows_seen: bool,
+    identified: bool,
+) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
+    for s in signals {
+        a.push(match s {
+            Signal::IocHit => "Isolate the device (unplug it or move it to a quarantine VLAN), block the IOC destination on the FortiGate, then find the process with `relayscan flows` and scan the host.",
+            Signal::GatewayTakeover => "Possible ARP spoofing: compare this MAC with the FortiGate's real MAC on its console. If they differ, find the switch port or Wi-Fi client and disconnect it, and enable ARP inspection.",
+            Signal::IpChurn => "Check the FortiGate DHCP log for this MAC: frequent IP changes can mean MAC spoofing or a misbehaving client.",
+            Signal::MultiSourceReports => "Look up the reported destination (AbuseIPDB/OTX) and block it if the connection is not expected.",
+            Signal::Beaconing => "Periodic connections: identify the process and confirm it is a legitimate updater or heartbeat. Otherwise treat it as possible C2.",
+            Signal::BaselineDeviation => "New destinations compared with the baseline: confirm that a recent install or update explains them.",
+            Signal::LargeEgress => "Large upload: confirm it is an expected backup or sync.",
+            Signal::TrustedBaseline => continue,
+        }.to_string());
+    }
+    if !identified {
+        a.push(if d.mac_randomized {
+            format!("Identify the owner: look up {} in the FortiGate DHCP / Wi-Fi client list. Randomized MACs are normal for phones and laptops, but they hide the vendor.", d.mac)
+        } else {
+            format!("Identify the device: vendor unknown. Check the FortiGate DHCP lease hostname for {}.", d.mac)
+        });
+    }
+    if !inp.traffic_visible {
+        a.push("To rate its behaviour, its traffic must be observed: export FortiGate traffic logs or mirror the gateway port to a Zeek sensor. On a switched or Wi-Fi LAN this Mac cannot see other devices' traffic.".into());
+    } else if !flows_seen {
+        a.push(
+            "Collect this host's connections: run `relayscan watch` (or press r in the TUI)."
+                .into(),
+        );
+    }
+    match d.device_type {
+        DeviceType::Camera | DeviceType::Iot => a.push(
+            "IoT/camera hygiene: change the default password, update the firmware, and isolate it on an IoT VLAN.".into(),
+        ),
+        DeviceType::Router => a.push(
+            "Gateway: keep FortiOS patched. Its traffic logs are the best source for rating every other device.".into(),
+        ),
+        _ => {}
+    }
+    if !d.acknowledged {
+        a.push(format!(
+            "If this device is expected here, acknowledge it (press a, or `relayscan ack {}`).",
+            d.mac
+        ));
+    }
+    if !d.trusted && identified && signals.is_empty() {
+        a.push("If you recognise it, mark it trusted (press t). That raises confidence, and it gets −15 while it matches its baseline.".into());
+    }
+    a
 }
 
 pub fn level_for(score: u8) -> RiskLevel {
@@ -367,8 +545,24 @@ pub fn dst_bucket(ip: &IpAddr) -> String {
     }
 }
 
+/// (ready, hours covered). A young baseline makes almost every destination
+/// look "new", so deviation only counts once it is old and large enough.
+fn baseline_ready(cfg: &RiskConfig, flows: &[Flow]) -> (bool, i64) {
+    let span = match (
+        flows.iter().map(|f| f.first_seen).min(),
+        flows.iter().map(|f| f.last_seen).max(),
+    ) {
+        (Some(a), Some(b)) => (b - a).num_hours(),
+        _ => 0,
+    };
+    (
+        flows.len() >= cfg.baseline_min_flows && span >= cfg.baseline_min_span_hours,
+        span,
+    )
+}
+
 fn baseline_deviation(cfg: &RiskConfig, inp: &Inputs) -> Option<String> {
-    if inp.baseline_flows.len() < cfg.baseline_min_flows {
+    if !baseline_ready(cfg, inp.baseline_flows).0 {
         return None;
     }
     let off = |f: &&Flow| !(inp.is_on_link)(&f.dst_ip);
@@ -512,6 +706,7 @@ mod tests {
                     baseline_flows: &self.base,
                     verdicts: &self.verdicts,
                     ti_checked: true,
+                    traffic_visible: true,
                     is_on_link: &on_link,
                 },
                 Utc::now(),
@@ -524,13 +719,13 @@ mod tests {
     }
 
     fn baseline(n: usize) -> Vec<Flow> {
-        let t = Utc::now() - Duration::days(1);
+        let t = Utc::now() - Duration::days(3);
         (0..n)
             .map(|i| {
                 flow(
                     "17.57.145.132",
                     443,
-                    t + Duration::seconds((i * i * 37 + i * 5) as i64), // irregular: not a beacon
+                    t + Duration::seconds((i * i * 111 + i * 5) as i64), // irregular: not a beacon
                     10,
                 )
             })
@@ -647,6 +842,26 @@ mod tests {
     }
 
     #[test]
+    fn young_baseline_never_flags_deviation() {
+        let mut c = Case::new(device(false, true));
+        let t = Utc::now() - Duration::hours(2);
+        c.base = (0..40)
+            .map(|i| flow("17.57.145.132", 443, t + Duration::seconds(i * i * 3), 10))
+            .collect();
+        c.window = (0..6)
+            .map(|i| flow(&format!("198.51.{i}.9"), 443, Utc::now(), 10))
+            .collect();
+        let a = c.run();
+        assert!(!signals(&a).contains(&Signal::BaselineDeviation));
+        let b = a
+            .evidence
+            .iter()
+            .find(|e| e.factor == "Behaviour baseline")
+            .unwrap();
+        assert!(!b.present && b.note.starts_with("still learning"));
+    }
+
+    #[test]
     fn large_egress_off_link_only() {
         let mut c = Case::new(device(false, true));
         c.window = vec![flow("192.168.50.10", 445, Utc::now(), 2 << 30)];
@@ -680,6 +895,62 @@ mod tests {
         let a = c.run_cfg(&cfg);
         assert_eq!(a.score, 3);
         assert_eq!(a.level, RiskLevel::Green);
+    }
+
+    #[test]
+    fn explains_gray_and_suggests_actions() {
+        let mut d = device(false, false);
+        d.device_type = DeviceType::Camera;
+        let empty_f: Vec<Flow> = vec![];
+        let v = HashMap::new();
+        let a = assess(
+            &RiskConfig::default(),
+            &Inputs {
+                device: &d,
+                ip_history: &[],
+                gateway_original_mac: None,
+                window_flows: &empty_f,
+                baseline_flows: &empty_f,
+                verdicts: &v,
+                ti_checked: true,
+                traffic_visible: false,
+                is_on_link: &on_link,
+            },
+            Utc::now(),
+        );
+        assert_eq!(a.level, RiskLevel::Gray);
+        assert!(a.summary.contains("not pass through this Mac"));
+        let missing: Vec<&str> = a
+            .evidence
+            .iter()
+            .filter(|e| !e.present)
+            .map(|e| e.factor.as_str())
+            .collect();
+        assert!(missing.contains(&"Traffic visible") && missing.contains(&"Identity"));
+        let sum: f32 = a
+            .evidence
+            .iter()
+            .filter(|e| e.present)
+            .map(|e| e.weight)
+            .sum();
+        assert!((sum.min(1.0) - a.confidence).abs() < 1e-6);
+        let acts = a.actions.join("\n");
+        assert!(acts.contains("DHCP"), "identify via DHCP");
+        assert!(acts.contains("Zeek"), "how to get visibility");
+        assert!(acts.contains("IoT/camera"));
+    }
+
+    #[test]
+    fn ioc_actions_come_first() {
+        let mut c = Case::new(device(false, true));
+        c.window = vec![flow("162.243.103.246", 443, Utc::now(), 10)];
+        c.verdicts.insert(
+            "162.243.103.246".parse().unwrap(),
+            vec![verdict("162.243.103.246", "feodo", true, 0.95, None)],
+        );
+        let a = c.run();
+        assert!(a.actions[0].starts_with("Isolate"));
+        assert!(a.summary.contains("act now"));
     }
 
     #[test]

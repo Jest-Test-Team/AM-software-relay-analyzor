@@ -141,3 +141,32 @@ Verification: a unit test builds a synthetic SQLite DB. `probe` finds 2 IPs and 
 - **B3** ASN lookup (RIPEstat or a local DB), to replace the /24 and /48 baseline buckets.
 - **B4** Run the Kaspersky spike above, then specialise `import` for whichever table holds devices.
 - **Later (plan §7):** MCP server, Flutter UI or merging into `rp_app`, and a Pi + Zeek sensor at the gateway for traffic from other devices.
+
+## Follow-up: score/confidence explainability (2026-11-27)
+
+Triggered by TUI screenshots showing every device as Gray with an unexplained confidence of 0% or 30%.
+
+- **Confidence is now an explicit breakdown** (`Assessment.evidence`):
+
+  | Factor | Weight |
+  |---|---|
+  | Identity | +25 |
+  | Advertised services | +5 |
+  | Stable presence | +10 |
+  | Traffic visible | +30 |
+  | Threat-intel check | +15 |
+  | Behaviour baseline | +10 |
+  | Owner confirmed | +20 |
+
+  Each factor shows ✔ or ✘ with a note saying what is known or missing.
+- **`summary`** is one sentence per level. Gray on a device this Mac cannot observe now reads "Unrated, not idle…" instead of "no traffic".
+- **`actions`** are next steps, generated from the fired signals (IOC → isolate and block, ARP takeover → verify the gateway MAC, …) and from what is missing:
+  - identify the device via the FortiGate DHCP list;
+  - get traffic visibility via FortiGate logs or a Zeek mirror port;
+  - IoT hygiene;
+  - ack or trust the device.
+- **False-positive fix:** baseline deviation now requires the baseline to span ≥ 24 h (`baseline_min_span_hours`). Previously a 1-hour-old baseline flagged this Mac as Yellow, with "41/53 new destinations".
+- **The TUI takes a nettop snapshot at startup**, so this host is rated straight away. The detail pane shows the summary, the reasons, the confidence breakdown and the next steps; J/K scroll it.
+- `relayscan assess --explain [--mac …]` prints the same information in the CLI.
+
+Why online devices show no traffic: "Online" means the device answered ARP on the LAN. Its own connections go straight to the FortiGate. On a switched or Wi-Fi network this Mac only receives its own unicast traffic plus broadcast and multicast, so other devices' flows are invisible here. Rating them needs FortiGate traffic logs (next adapter: backlog B5) or a mirror-port sensor.

@@ -29,6 +29,12 @@ pub struct Args {
     all: bool,
     #[arg(long)]
     json: bool,
+    /// Print summary, confidence breakdown and next steps per device.
+    #[arg(long)]
+    explain: bool,
+    /// Only these devices (MAC); implies nothing else changes.
+    #[arg(long = "mac")]
+    macs: Vec<relay_core::Mac>,
     #[arg(long)]
     iface: Option<String>,
 }
@@ -95,6 +101,7 @@ pub fn assess_all(
                 baseline_flows: if is_self { &base } else { &empty },
                 verdicts: &verdicts,
                 ti_checked,
+                traffic_visible: is_self,
                 is_on_link: &on_link,
             },
             now,
@@ -114,6 +121,41 @@ pub fn badge(l: RiskLevel) -> &'static str {
         RiskLevel::Red => "RED   ",
         RiskLevel::Gray => "GRAY  ",
     }
+}
+
+fn explain(d: &Device, a: &Assessment) {
+    println!(
+        "{} {} ({}, {})  score {}  confidence {:.0}%",
+        badge(a.level).trim(),
+        d.display_name(),
+        d.ips
+            .iter()
+            .find(|i| i.is_ipv4())
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
+        d.mac,
+        a.score,
+        a.confidence * 100.0
+    );
+    println!("  {}", a.summary);
+    for r in &a.reasons {
+        println!("  {:+4}  {}", r.delta, r.detail);
+    }
+    println!("  confidence:");
+    for e in &a.evidence {
+        println!(
+            "    {} {:<20} +{:<3.0} {}",
+            if e.present { "✔" } else { "✘" },
+            e.factor,
+            e.weight * 100.0,
+            e.note
+        );
+    }
+    println!("  next steps:");
+    for (i, act) in a.actions.iter().enumerate() {
+        println!("    {}. {act}", i + 1);
+    }
+    println!();
 }
 
 pub fn load_config(path: Option<&std::path::Path>) -> Result<RiskConfig> {
@@ -142,7 +184,14 @@ pub fn run(store: &Store, args: &Args) -> Result<()> {
     let res: Vec<_> = res
         .into_iter()
         .filter(|(d, _)| args.all || d.connection_status == relay_core::ConnectionStatus::Online)
+        .filter(|(d, _)| args.macs.is_empty() || args.macs.contains(&d.mac))
         .collect();
+    if args.explain {
+        for (d, a) in &res {
+            explain(d, a);
+        }
+        return Ok(());
+    }
     if args.json {
         let v: Vec<_> = res
             .iter()
@@ -179,7 +228,7 @@ pub fn run(store: &Store, args: &Args) -> Result<()> {
     }
     let c = |l| counts.get(&l).copied().unwrap_or(0);
     println!(
-        "{} devices: {} red, {} orange, {} yellow, {} green, {} gray (insufficient data — no flows visible from this host)",
+        "{} devices: {} red, {} orange, {} yellow, {} green, {} gray (unrated: online, but their traffic does not pass through this Mac; see --explain)",
         res.len(),
         c(RiskLevel::Red),
         c(RiskLevel::Orange),

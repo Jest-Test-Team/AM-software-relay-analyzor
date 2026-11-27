@@ -39,6 +39,7 @@ pub struct App {
     pub state: ListState,
     pub show_offline: bool,
     pub status: String,
+    pub detail_scroll: u16,
 }
 
 impl App {
@@ -86,6 +87,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Paragraph::new(Line::from(vec![
             " ↑↓/jk ".bold(),
             "move  ".into(),
+            "J/K ".bold(),
+            "scroll details  ".into(),
             "a ".bold(),
             "ack  ".into(),
             "t ".bold(),
@@ -240,15 +243,10 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             )),
         ]),
     ];
-    if a.reasons.is_empty() {
-        lines.push(Line::from(
-            if a.level == RiskLevel::Gray {
-                "  insufficient data: no traffic from this device is visible to this host"
-            } else {
-                "  no risk signals"
-            }
-            .dim(),
-        ));
+    lines.push(Line::from(Span::raw(format!("  {}", a.summary)).italic()));
+    if !a.reasons.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Why this score".dim()));
     }
     for r in &a.reasons {
         lines.push(Line::from(vec![
@@ -259,6 +257,32 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             }),
             Span::raw(r.detail.clone()),
         ]));
+    }
+    if !a.evidence.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            format!("Confidence {:.0}% — built from", a.confidence * 100.0).dim(),
+        ));
+        for e in &a.evidence {
+            let (mark, col) = if e.present {
+                ("✔", Color::Green)
+            } else {
+                ("✘", Color::DarkGray)
+            };
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {mark} ")).fg(col),
+                Span::raw(format!("{:<20}", e.factor)).bold(),
+                Span::raw(format!("{:>4}  ", format!("+{:.0}", e.weight * 100.0))).fg(col),
+                Span::raw(e.note.clone()).dim(),
+            ]));
+        }
+    }
+    if !a.actions.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("Next steps".dim()));
+        for (i, act) in a.actions.iter().enumerate() {
+            lines.push(Line::from(format!("  {}. {act}", i + 1)));
+        }
     }
     if app.self_ip.is_some_and(|ip| d.ips.contains(&ip)) && !app.flows.is_empty() {
         lines.push(Line::from(""));
@@ -332,7 +356,11 @@ pub fn run(store: &mut Store, oui: &OuiDb, args: &Args) -> Result<()> {
         state: ListState::default(),
         show_offline: false,
         status: String::new(),
+        detail_scroll: 0,
     };
+    // Capture this host's connections up front (local nettop; no network
+    // calls), so the self device is rated instead of showing Gray.
+    app.status = rescan(&mut ctx).unwrap_or_else(|e| format!("initial scan failed: {e:#}"));
     reload(&mut ctx, &mut app)?;
     let mut terminal = ratatui::init();
     let res = event_loop(&mut terminal, &mut ctx, &mut app, args.reload);
@@ -356,8 +384,16 @@ fn event_loop(
                 }
                 match k.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Down | KeyCode::Char('j') => app.move_by(1),
-                    KeyCode::Up | KeyCode::Char('k') => app.move_by(-1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.move_by(1);
+                        app.detail_scroll = 0;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.move_by(-1);
+                        app.detail_scroll = 0;
+                    }
+                    KeyCode::Char('J') => app.detail_scroll = app.detail_scroll.saturating_add(3),
+                    KeyCode::Char('K') => app.detail_scroll = app.detail_scroll.saturating_sub(3),
                     KeyCode::PageDown => app.move_by(10),
                     KeyCode::PageUp => app.move_by(-10),
                     KeyCode::Char('o') => {
@@ -449,6 +485,14 @@ mod tests {
                 score: 100,
                 level,
                 confidence: 0.6,
+                summary: "act now".into(),
+                evidence: vec![relay_core::risk::Evidence {
+                    factor: "Traffic visible".into(),
+                    weight: 0.3,
+                    present: false,
+                    note: "not through this Mac".into(),
+                }],
+                actions: vec!["Isolate the device".into()],
                 reasons: vec![Reason {
                     signal: Signal::IocHit,
                     delta: 100,
@@ -472,6 +516,7 @@ mod tests {
             state: ListState::default().with_selected(Some(0)),
             show_offline: false,
             status: String::new(),
+            detail_scroll: 0,
         };
         let mut term = Terminal::new(TestBackend::new(140, 30)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -509,6 +554,7 @@ mod tests {
             state: ListState::default().with_selected(Some(0)),
             show_offline: false,
             status: String::new(),
+            detail_scroll: 0,
         };
         app.move_by(5);
         assert_eq!(app.state.selected(), Some(1));

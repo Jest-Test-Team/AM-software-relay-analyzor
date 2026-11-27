@@ -20,5 +20,6 @@ beacon_max_interval_s = 3600.0
 baseline_min_flows = 20
 baseline_min_new = 5
 baseline_min_new_ratio = 0.5
+baseline_min_span_hours = 24
 egress_bytes_threshold = 524288000
 gray_below_confidence = 0.5
