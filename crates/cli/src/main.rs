@@ -6,6 +6,7 @@ mod discover;
 mod flows;
 mod intel;
 mod table;
+mod tui;
 mod watch;
 
 use anyhow::{Context, Result};
@@ -44,6 +45,8 @@ enum Cmd {
     Intel(intel::Args),
     /// Score every device (Green/Yellow/Orange/Red/Gray) with reasons.
     Assess(assess::Args),
+    /// Interactive two-pane device view (Kaspersky Smart Home Monitor style).
+    Tui(tui::Args),
     /// List known devices.
     Devices {
         #[arg(long)]
@@ -108,6 +111,7 @@ fn main() -> Result<()> {
         }
         Cmd::Intel(args) => intel::run(&store, args),
         Cmd::Assess(args) => assess::run(&store, args),
+        Cmd::Tui(args) => tui::run(&mut store, &load_oui(&cli), args),
         Cmd::Devices { json, all } => {
             let devs: Vec<_> = store
                 .devices()?
