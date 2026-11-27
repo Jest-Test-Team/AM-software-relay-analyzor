@@ -209,3 +209,20 @@ pub struct Flow {
     pub bytes_in: Option<u64>,
     pub bytes_out: Option<u64>,
 }
+
+/// One threat-intelligence answer about an indicator (IP for now).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Verdict {
+    pub indicator: IpAddr,
+    pub source: String,
+    /// High-confidence known-bad (IOC hit), as opposed to merely reported.
+    pub malicious: bool,
+    /// Number of independent reporters, where the source exposes it.
+    pub reporters: Option<u32>,
+    /// 0.0–1.0, the source's own confidence.
+    pub confidence: f32,
+    /// e.g. `botnet_cc`, `drop`, `abuse-reports`.
+    pub category: String,
+    pub detail: String,
+    pub fetched_at: DateTime<Utc>,
+}

@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS flow (
 );
 CREATE INDEX IF NOT EXISTS flow_dst ON flow(dst_ip, first_seen);
 CREATE INDEX IF NOT EXISTS flow_last ON flow(last_seen);
+CREATE TABLE IF NOT EXISTS intel_hit (
+    indicator  TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    verdict    TEXT,            -- JSON Verdict, NULL = looked up, nothing found
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (indicator, source)
+);
 CREATE TABLE IF NOT EXISTS event (
     id    INTEGER PRIMARY KEY,
     ts    TEXT NOT NULL,
@@ -424,6 +431,57 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Cached TI answer if younger than `ttl`. `Some(None)` = cached negative.
+    pub fn intel_cached(
+        &self,
+        indicator: IpAddr,
+        source: &str,
+        ttl: Duration,
+    ) -> Result<Option<Option<Verdict>>> {
+        let row: Option<(Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT verdict, fetched_at FROM intel_hit WHERE indicator=?1 AND source=?2",
+                params![indicator.to_string(), source],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((v, at)) = row else { return Ok(None) };
+        if Utc::now() - parse_ts(&at)? > ttl {
+            return Ok(None);
+        }
+        Ok(Some(v.map(|j| serde_json::from_str(&j)).transpose()?))
+    }
+
+    pub fn intel_put(&self, indicator: IpAddr, source: &str, v: Option<&Verdict>) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO intel_hit (indicator, source, verdict, fetched_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                indicator.to_string(),
+                source,
+                v.map(serde_json::to_string).transpose()?,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// All cached positive verdicts for an indicator (any age).
+    pub fn intel_verdicts(&self, indicator: IpAddr) -> Result<Vec<Verdict>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT verdict FROM intel_hit WHERE indicator=?1 AND verdict IS NOT NULL")?;
+        let rows = stmt.query_map([indicator.to_string()], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for j in rows {
+            out.push(serde_json::from_str(&j?)?);
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub ts: DateTime<Utc>,
@@ -655,6 +713,41 @@ mod tests {
         assert_eq!(got[0].first_seen.timestamp(), t0.timestamp());
         assert_eq!(got[0].bytes_in, Some(500));
         assert!(got[0].dst_mac.is_none());
+    }
+
+    #[test]
+    fn intel_cache_roundtrip_and_ttl() {
+        let s = Store::in_memory().unwrap();
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert_eq!(
+            s.intel_cached(ip, "feodo", Duration::hours(1)).unwrap(),
+            None
+        );
+        s.intel_put(ip, "abuseipdb", None).unwrap();
+        assert_eq!(
+            s.intel_cached(ip, "abuseipdb", Duration::hours(1)).unwrap(),
+            Some(None)
+        );
+        let v = Verdict {
+            indicator: ip,
+            source: "feodo".into(),
+            malicious: true,
+            reporters: None,
+            confidence: 0.95,
+            category: "botnet_cc".into(),
+            detail: "test".into(),
+            fetched_at: Utc::now(),
+        };
+        s.intel_put(ip, "feodo", Some(&v)).unwrap();
+        assert_eq!(
+            s.intel_cached(ip, "feodo", Duration::hours(1)).unwrap(),
+            Some(Some(v.clone()))
+        );
+        assert_eq!(
+            s.intel_cached(ip, "feodo", Duration::seconds(-1)).unwrap(),
+            None
+        );
+        assert_eq!(s.intel_verdicts(ip).unwrap(), vec![v]);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 pub mod classify;
 pub mod oui;
+pub mod ti;
 
 pub use classify::{classify, Context};
 pub use oui::OuiDb;

@@ -3,3 +3,4 @@
 data/oui.csv
 *.sqlite
 *.sqlite-*
+data/feeds/
