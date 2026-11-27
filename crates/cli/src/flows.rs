@@ -115,10 +115,14 @@ pub fn run(store: &mut Store, net: &NetInfo, args: &Args) -> Result<()> {
                 .unwrap_or_else(|| "-".into())
         );
     }
+    let (n, p) = (fl.len(), agg.len());
     println!(
-        "{} connections, {} distinct process→destination pairs",
-        fl.len(),
-        agg.len()
+        "{}",
+        relay_core::tr!(
+            crate::lang(),
+            "{n} connections, {p} distinct process→destination pairs",
+            "{n} 條連線，{p} 組不同的程序→目的地"
+        )
     );
     Ok(())
 }

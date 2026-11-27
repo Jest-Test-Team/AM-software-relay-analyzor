@@ -95,20 +95,27 @@ pub fn run(store: &mut Store, oui: &OuiDb, args: &Args) -> Result<()> {
         .filter(|d| d.connection_status == relay_core::ConnectionStatus::Online)
         .count();
     println!(
-        "{active_note}{} neighbour sightings, {} name/service sightings ({} unmatched); {online} devices online, {} new",
-        r1.observations,
-        r2.observations,
-        r2.unmatched,
-        r1.new_devices.len() + r2.new_devices.len()
+        "{}",
+        relay_core::tr!(
+            crate::lang(),
+            "{active_note}{} neighbour sightings, {} name/service sightings ({} unmatched); {online} devices online, {} new",
+            "{active_note}鄰居紀錄 {} 筆、名稱／服務紀錄 {} 筆（{} 筆無法對應）；{online} 台在線，{} 台新裝置",
+            r1.observations,
+            r2.observations,
+            r2.unmatched,
+            r1.new_devices.len() + r2.new_devices.len()
+        )
     );
     for mac in r1.new_devices.iter().chain(&r2.new_devices) {
         if let Some(d) = store.device(*mac)? {
+            let l = crate::lang();
             println!(
-                "  NEW DEVICE  {:<15} {}  {}  {}",
+                "  {}  {:<15} {}  {}  {}",
+                relay_core::tr!(l, "NEW DEVICE", "新裝置"),
                 d.ips.first().map(|i| i.to_string()).unwrap_or_default(),
                 d.mac,
-                d.display_name(),
-                d.vendor_label()
+                relay_core::i18n::display_name(l, &d),
+                relay_core::i18n::vendor_label(l, &d)
             );
         }
     }

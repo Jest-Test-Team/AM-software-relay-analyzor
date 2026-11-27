@@ -96,11 +96,12 @@ pub struct Stored {
 
 impl std::fmt::Display for Stored {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{} flows ({} new), {} new devices, {} non-traffic/unparsed records skipped",
-            self.flows, self.new_flows, self.new_devices, self.skipped
-        )
+        let (a, b, c, d) = (self.flows, self.new_flows, self.new_devices, self.skipped);
+        f.write_str(&relay_core::tr!(
+            crate::lang(),
+            "{a} flows ({b} new), {c} new devices, {d} non-traffic/unparsed records skipped",
+            "{a} 條連線（{b} 條新的）、{c} 台新裝置、略過 {d} 筆非流量／無法解析的紀錄"
+        ))
     }
 }
 
@@ -170,7 +171,14 @@ pub fn import(store: &mut Store, oui: &OuiDb, cmd: &ImportCmd) -> Result<()> {
 }
 
 fn hint() {
-    println!("next: `relayscan assess --explain` or `relayscan tui` to see the rated devices");
+    println!(
+        "{}",
+        relay_core::tr!(
+            crate::lang(),
+            "next: `relayscan assess --explain` or `relayscan tui` to see the rated devices",
+            "下一步：執行 `relayscan assess --explain` 或 `relayscan tui` 查看評級結果"
+        )
+    );
 }
 
 pub fn syslog(store: &mut Store, oui: &OuiDb, a: &SyslogArgs) -> Result<()> {

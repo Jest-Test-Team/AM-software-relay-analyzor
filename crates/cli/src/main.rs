@@ -14,7 +14,7 @@ mod watch;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use relay_core::{store::Flag, Mac, Store};
+use relay_core::{store::Flag, tr, Mac, Store};
 use relay_intel::OuiDb;
 use std::path::PathBuf;
 
@@ -88,6 +88,13 @@ enum Cmd {
     },
 }
 
+static LANG: std::sync::OnceLock<relay_core::Lang> = std::sync::OnceLock::new();
+
+/// Display language chosen at startup (`--lang`, env, OS setting).
+pub fn lang() -> relay_core::Lang {
+    LANG.get().copied().unwrap_or_default()
+}
+
 fn db_path(cli: &Cli) -> Result<PathBuf> {
     if let Some(p) = cli
         .db
@@ -121,6 +128,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut store = Store::open(db_path(&cli)?)?;
     let lang = relay_core::Lang::detect(cli.lang.as_deref(), &|k| std::env::var(k).ok());
+    let _ = LANG.set(lang);
     match &cli.cmd {
         Cmd::Discover(args) => discover::run(&mut store, &load_oui(&cli), args),
         Cmd::Watch(args) => watch::run(&mut store, &load_oui(&cli), args),
@@ -157,6 +165,11 @@ fn main() -> Result<()> {
 
 fn flag(store: &Store, mac: Mac, f: Flag, v: bool) -> Result<()> {
     anyhow::ensure!(store.set_flag(mac, f, v)?, "unknown device {mac}");
-    println!("{mac}: {f:?} = {v}");
+    let what = match (f, v) {
+        (Flag::Acknowledged, _) => tr!(lang(), "acknowledged", "已確認"),
+        (Flag::Trusted, true) => tr!(lang(), "trusted", "已信任"),
+        (Flag::Trusted, false) => tr!(lang(), "no longer trusted", "已取消信任"),
+    };
+    println!("{mac}: {what}");
     Ok(())
 }
