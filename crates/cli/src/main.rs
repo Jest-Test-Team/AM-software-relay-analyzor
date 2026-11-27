@@ -5,6 +5,8 @@ mod compare;
 mod discover;
 mod flows;
 mod intel;
+#[cfg(feature = "kaspersky")]
+mod kaspersky;
 mod table;
 mod tui;
 mod watch;
@@ -47,6 +49,10 @@ enum Cmd {
     Assess(assess::Args),
     /// Interactive two-pane device view (Kaspersky Smart Home Monitor style).
     Tui(tui::Args),
+    /// Kaspersky local-DB spike tools (build with --features kaspersky).
+    #[cfg(feature = "kaspersky")]
+    #[command(subcommand)]
+    Kaspersky(kaspersky::Cmd),
     /// List known devices.
     Devices {
         #[arg(long)]
@@ -112,6 +118,8 @@ fn main() -> Result<()> {
         Cmd::Intel(args) => intel::run(&store, args),
         Cmd::Assess(args) => assess::run(&store, args),
         Cmd::Tui(args) => tui::run(&mut store, &load_oui(&cli), args),
+        #[cfg(feature = "kaspersky")]
+        Cmd::Kaspersky(c) => kaspersky::run(&mut store, &load_oui(&cli), c),
         Cmd::Devices { json, all } => {
             let devs: Vec<_> = store
                 .devices()?

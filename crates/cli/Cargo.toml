@@ -8,6 +8,9 @@ license.workspace = true
 name = "relayscan"
 path = "src/main.rs"
 
+[features]
+kaspersky = ["relay-collect/kaspersky"]
+
 [dependencies]
 relay-core.workspace = true
 relay-collect.workspace = true

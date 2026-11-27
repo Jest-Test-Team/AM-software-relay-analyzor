@@ -4,7 +4,11 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+kaspersky = ["dep:rusqlite"]
+
 [dependencies]
+rusqlite = { workspace = true, optional = true }
 relay-core.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

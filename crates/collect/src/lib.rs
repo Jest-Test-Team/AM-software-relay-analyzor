@@ -5,6 +5,8 @@
 
 pub mod arp;
 pub mod flows;
+#[cfg(feature = "kaspersky")]
+pub mod kaspersky;
 pub mod mdns;
 pub mod netinfo;
 pub mod rdns;
