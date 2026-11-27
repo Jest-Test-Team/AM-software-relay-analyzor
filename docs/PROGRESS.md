@@ -7,7 +7,7 @@ Plan: [PLAN.md](PLAN.md)
 | P0 Discovery | ✅ done | 8/8 recall vs Kaspersky Smart Home Monitor list |
 | P1 Flows | ✅ done | nettop collector, `flows`, `watch` |
 | P2 Threat intel | ✅ done | offline Feodo + Spamhaus DROP; keyed ThreatFox + AbuseIPDB |
-| P3 Baseline & risk | todo | |
+| P3 Baseline & risk | ✅ done | `assess`; synthetic IOC test → Red |
 | P4 TUI | todo | |
 | P5 Kaspersky adapter | blocked on user spike | |
 
@@ -74,3 +74,25 @@ Verification:
 - Checking the 68 live public destinations returned 0 hits.
 
 Not done (as planned): GreyNoise, OTX, VirusTotal and RIPEstat ASN. Backlog B3: ASN lookup, which the P3 "new destination ASN" baseline signal needs. Until then the baseline uses /24 (v4) and /48 (v6) prefixes as a stand-in for ASN.
+
+## P3 — alignment check (2026-11-27)
+
+| Plan item | Status |
+|---|---|
+| Risk engine in `core::risk` with the ref.txt §6 weights, clamped to 0..100 | ✅ All 8 signals are implemented, with one table test per signal plus clamping and config-override tests. |
+| Levels: 0–19 Green, 20–49 Yellow, 50–79 Orange, ≥80 or any IOC Red, low confidence Gray | ✅ |
+| Weights in TOML | ✅ `--config`, see `docs/risk.example.toml`. |
+| Human-readable `reasons[]` stored per assessment | ✅ `assessment` table holds the latest result per device. Level changes are written to `event`. |
+| Per-device baseline | ⚠️ Flows exist for **this host only**, so the baseline and beaconing apply to the self device. Other devices get L2 signals only: IP churn and gateway takeover. |
+| Beaconing detector | ✅ Coefficient of variation of the gaps between connection start times, per (process, dst, port), at least 6 connections, interval 10 s–1 h. |
+| `assess` | ✅ `--window`, `--baseline-days`, `--offline`, `--json`, `--all`. |
+
+Design decisions made during P3:
+- **Gateway takeover** goes to the *new* MAC that claims the gateway IP (the likely spoofer). The original gateway MAC is not penalised.
+- **Trusted bonus (−15)** applies only when no positive signal fired, so it can never hide a real finding.
+- **Baseline buckets** are /24 (v4) and /48 (v6) for now, since ASN data is not available yet (backlog B3).
+- **Beaconing granularity:** `first_seen` comes from snapshots, so its resolution equals the `watch --interval` (default 30 s). Beacons faster than about 2× the interval cannot be resolved.
+
+Verification:
+- Unit test: a synthetic flow from this host to Feodo C2 `162.243.103.246` makes the self device **Red**, with "(feodo: botnet_cc)" in the reason. A second MAC that claims the gateway IP scores **45 (Yellow)**. The original gateway gets no penalty, and the other hosts stay **Gray**.
+- Live: this Mac is Green (score 0, confidence 90%) and the other 92 online devices are Gray.
