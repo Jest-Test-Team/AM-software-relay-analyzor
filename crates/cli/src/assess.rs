@@ -300,6 +300,9 @@ mod tests {
                 state: Some("Established".into()),
                 bytes_in: Some(1),
                 bytes_out: Some(1),
+                origin: Default::default(),
+                src_mac: None,
+                outcome: Default::default(),
             }])
             .unwrap();
         let intel = Intel {

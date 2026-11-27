@@ -62,6 +62,9 @@ pub fn parse_nettop(text: &str, now: DateTime<Utc>) -> Vec<Flow> {
             state: (!state.is_empty()).then(|| state.to_string()),
             bytes_in: cols[2].trim().parse().ok(),
             bytes_out: cols[3].trim().parse().ok(),
+            origin: relay_core::FlowOrigin::Nettop,
+            src_mac: None,
+            outcome: relay_core::FlowOutcome::from_tcp_state(state),
         });
     }
     out

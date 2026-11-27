@@ -646,6 +646,9 @@ mod tests {
             state: None,
             bytes_in: Some(0),
             bytes_out: Some(out),
+            origin: Default::default(),
+            src_mac: None,
+            outcome: Default::default(),
         }
     }
 

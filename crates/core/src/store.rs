@@ -10,7 +10,7 @@ use std::path::Path;
 /// A device is considered Online if seen within this window.
 pub const ONLINE_WINDOW_MINUTES: i64 = 10;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS device (
@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS flow (
     state      TEXT,
     bytes_in   INTEGER,
     bytes_out  INTEGER,
+    origin     TEXT NOT NULL DEFAULT 'nettop',
+    src_mac    TEXT,
+    outcome    TEXT NOT NULL DEFAULT 'active',
     UNIQUE (proto, src_ip, src_port, dst_ip, dst_port, pid)
 );
 CREATE INDEX IF NOT EXISTS flow_dst ON flow(dst_ip, first_seen);
@@ -101,9 +104,16 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         let ver: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ver < SCHEMA_VERSION {
+        if ver < 2 {
             // v1 → v2: flow became one row per connection (no data worth keeping).
             conn.execute_batch("DROP TABLE IF EXISTS flow;")?;
+        } else if ver == 2 {
+            // v2 → v3: flows from network sensors (origin, sender MAC, outcome).
+            conn.execute_batch(
+                "ALTER TABLE flow ADD COLUMN origin TEXT NOT NULL DEFAULT 'nettop';
+                 ALTER TABLE flow ADD COLUMN src_mac TEXT;
+                 ALTER TABLE flow ADD COLUMN outcome TEXT NOT NULL DEFAULT 'active';",
+            )?;
         }
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -318,8 +328,9 @@ impl Store {
         for f in flows {
             let n = tx.execute(
                 "INSERT INTO flow (first_seen, last_seen, pid, process, proto, src_ip, src_port,
-                                   dst_ip, dst_port, dst_mac, state, bytes_in, bytes_out)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                   dst_ip, dst_port, dst_mac, state, bytes_in, bytes_out,
+                                   origin, src_mac, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT (proto, src_ip, src_port, dst_ip, dst_port, pid) DO NOTHING",
                 params![
                     f.first_seen.to_rfc3339(),
@@ -335,13 +346,18 @@ impl Store {
                     f.state,
                     f.bytes_in.map(|b| b as i64),
                     f.bytes_out.map(|b| b as i64),
+                    f.origin.as_str(),
+                    f.src_mac.map(|m| m.to_string()),
+                    f.outcome.as_str(),
                 ],
             )?;
             if n == 0 {
                 tx.execute(
                     "UPDATE flow SET last_seen = max(last_seen, ?7), state = ?8,
                         bytes_in = max(coalesce(bytes_in, 0), coalesce(?9, 0)),
-                        bytes_out = max(coalesce(bytes_out, 0), coalesce(?10, 0))
+                        bytes_out = max(coalesce(bytes_out, 0), coalesce(?10, 0)),
+                        outcome = ?11, src_mac = coalesce(?12, src_mac),
+                        first_seen = min(first_seen, ?13)
                      WHERE proto=?1 AND src_ip=?2 AND src_port=?3 AND dst_ip=?4 AND dst_port=?5 AND pid=?6",
                     params![
                         f.proto.as_str(),
@@ -354,6 +370,9 @@ impl Store {
                         f.state,
                         f.bytes_in.map(|b| b as i64),
                         f.bytes_out.map(|b| b as i64),
+                        f.outcome.as_str(),
+                        f.src_mac.map(|m| m.to_string()),
+                        f.first_seen.to_rfc3339(),
                     ],
                 )?;
             } else {
@@ -368,7 +387,7 @@ impl Store {
     pub fn flows_since(&self, since: DateTime<Utc>) -> Result<Vec<Flow>> {
         let mut stmt = self.conn.prepare(
             "SELECT first_seen, last_seen, pid, process, proto, src_ip, src_port, dst_ip, dst_port,
-                    dst_mac, state, bytes_in, bytes_out
+                    dst_mac, state, bytes_in, bytes_out, origin, src_mac, outcome
              FROM flow WHERE last_seen >= ?1 ORDER BY last_seen DESC",
         )?;
         let rows = stmt.query_map([since.to_rfc3339()], |r| {
@@ -386,11 +405,15 @@ impl Store {
                 r.get::<_, Option<String>>(10)?,
                 r.get::<_, Option<i64>>(11)?,
                 r.get::<_, Option<i64>>(12)?,
+                r.get::<_, String>(13)?,
+                r.get::<_, Option<String>>(14)?,
+                r.get::<_, String>(15)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (fs, ls, pid, process, proto, sip, sport, dip, dport, dmac, state, bi, bo) = row?;
+            let (fs, ls, pid, process, proto, sip, sport, dip, dport, dmac, state, bi, bo, org, smac, oc) =
+                row?;
             out.push(Flow {
                 first_seen: parse_ts(&fs)?,
                 last_seen: parse_ts(&ls)?,
@@ -409,6 +432,9 @@ impl Store {
                 state,
                 bytes_in: bi.map(|b| b as u64),
                 bytes_out: bo.map(|b| b as u64),
+                origin: FlowOrigin::parse(&org),
+                src_mac: smac.map(|m| m.parse()).transpose()?,
+                outcome: FlowOutcome::parse(&oc),
             });
         }
         Ok(out)
@@ -750,6 +776,9 @@ mod tests {
             state: Some("Established".into()),
             bytes_in: Some(100),
             bytes_out: Some(10),
+            origin: FlowOrigin::Nettop,
+            src_mac: None,
+            outcome: FlowOutcome::Active,
         };
         assert_eq!(s.upsert_flows(std::slice::from_ref(&f)).unwrap(), 1);
         f.first_seen = t0 + Duration::minutes(1);
