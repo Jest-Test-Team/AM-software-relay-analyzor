@@ -3,7 +3,7 @@
 //! in Zeek to get `orig_l2_addr`, which attributes flows by MAC.
 
 use super::Batch;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration};
 use relay_core::{Flow, FlowOrigin, FlowOutcome, Mac, Observation, Proto, Source};
 use std::collections::HashMap;
 use std::net::IpAddr;

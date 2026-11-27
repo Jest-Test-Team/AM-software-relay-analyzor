@@ -178,7 +178,7 @@ pub struct IpBinding {
     pub last_seen: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Proto {
     Tcp,
     Udp,
