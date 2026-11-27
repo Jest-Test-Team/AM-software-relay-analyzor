@@ -3,6 +3,7 @@
 mod compare;
 mod discover;
 mod flows;
+mod intel;
 mod table;
 mod watch;
 
@@ -38,6 +39,8 @@ enum Cmd {
         #[arg(long)]
         iface: Option<String>,
     },
+    /// Look up flow destinations (or --ip) in threat intelligence.
+    Intel(intel::Args),
     /// List known devices.
     Devices {
         #[arg(long)]
@@ -100,6 +103,7 @@ fn main() -> Result<()> {
             let net = relay_collect::netinfo::detect(iface.as_deref())?;
             flows::run(&mut store, &net, args)
         }
+        Cmd::Intel(args) => intel::run(&store, args),
         Cmd::Devices { json, all } => {
             let devs: Vec<_> = store
                 .devices()?
