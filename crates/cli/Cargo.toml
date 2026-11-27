@@ -1,0 +1,18 @@
+[package]
+name = "relayscan"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "relayscan"
+path = "src/main.rs"
+
+[dependencies]
+relay-core.workspace = true
+relay-collect.workspace = true
+relay-intel.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+clap = { version = "4", features = ["derive"] }

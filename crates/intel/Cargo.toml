@@ -1,0 +1,9 @@
+[package]
+name = "relay-intel"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+relay-core.workspace = true
+anyhow.workspace = true

@@ -1,1 +1,5 @@
-/.ignore
+/target
+.ignore/
+data/oui.csv
+*.sqlite
+*.sqlite-*
