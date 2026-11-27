@@ -10,6 +10,8 @@ use std::path::Path;
 /// A device is considered Online if seen within this window.
 pub const ONLINE_WINDOW_MINUTES: i64 = 10;
 
+const SCHEMA_VERSION: i64 = 2;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS device (
     id            INTEGER PRIMARY KEY,
@@ -33,21 +35,24 @@ CREATE TABLE IF NOT EXISTS ip_binding (
 );
 CREATE INDEX IF NOT EXISTS ip_binding_ip ON ip_binding(ip, last_seen);
 CREATE TABLE IF NOT EXISTS flow (
-    id        INTEGER PRIMARY KEY,
-    ts        TEXT NOT NULL,
-    pid       INTEGER,
-    process   TEXT,
-    proto     TEXT NOT NULL,
-    src_ip    TEXT NOT NULL,
-    src_port  INTEGER NOT NULL,
-    dst_ip    TEXT NOT NULL,
-    dst_port  INTEGER NOT NULL,
-    dst_mac   TEXT,
-    state     TEXT,
-    bytes_in  INTEGER,
-    bytes_out INTEGER
+    id         INTEGER PRIMARY KEY,
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL,
+    pid        INTEGER NOT NULL DEFAULT -1,
+    process    TEXT,
+    proto      TEXT NOT NULL,
+    src_ip     TEXT NOT NULL,
+    src_port   INTEGER NOT NULL,
+    dst_ip     TEXT NOT NULL,
+    dst_port   INTEGER NOT NULL,
+    dst_mac    TEXT,
+    state      TEXT,
+    bytes_in   INTEGER,
+    bytes_out  INTEGER,
+    UNIQUE (proto, src_ip, src_port, dst_ip, dst_port, pid)
 );
-CREATE INDEX IF NOT EXISTS flow_dst ON flow(dst_ip, ts);
+CREATE INDEX IF NOT EXISTS flow_dst ON flow(dst_ip, first_seen);
+CREATE INDEX IF NOT EXISTS flow_last ON flow(last_seen);
 CREATE TABLE IF NOT EXISTS event (
     id    INTEGER PRIMARY KEY,
     ts    TEXT NOT NULL,
@@ -83,7 +88,13 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        let ver: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if ver < SCHEMA_VERSION {
+            // v1 → v2: flow became one row per connection (no data worth keeping).
+            conn.execute_batch("DROP TABLE IF EXISTS flow;")?;
+        }
         conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
 
@@ -286,6 +297,141 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Upsert a flow snapshot: one row per (5-tuple, pid); counters and
+    /// last_seen advance, first_seen is kept. Returns rows that were new.
+    pub fn upsert_flows(&mut self, flows: &[Flow]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut new = 0;
+        for f in flows {
+            let n = tx.execute(
+                "INSERT INTO flow (first_seen, last_seen, pid, process, proto, src_ip, src_port,
+                                   dst_ip, dst_port, dst_mac, state, bytes_in, bytes_out)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT (proto, src_ip, src_port, dst_ip, dst_port, pid) DO NOTHING",
+                params![
+                    f.first_seen.to_rfc3339(),
+                    f.last_seen.to_rfc3339(),
+                    f.pid.map(i64::from).unwrap_or(-1),
+                    f.process,
+                    f.proto.as_str(),
+                    f.src_ip.to_string(),
+                    f.src_port,
+                    f.dst_ip.to_string(),
+                    f.dst_port,
+                    f.dst_mac.map(|m| m.to_string()),
+                    f.state,
+                    f.bytes_in.map(|b| b as i64),
+                    f.bytes_out.map(|b| b as i64),
+                ],
+            )?;
+            if n == 0 {
+                tx.execute(
+                    "UPDATE flow SET last_seen = max(last_seen, ?7), state = ?8,
+                        bytes_in = max(coalesce(bytes_in, 0), coalesce(?9, 0)),
+                        bytes_out = max(coalesce(bytes_out, 0), coalesce(?10, 0))
+                     WHERE proto=?1 AND src_ip=?2 AND src_port=?3 AND dst_ip=?4 AND dst_port=?5 AND pid=?6",
+                    params![
+                        f.proto.as_str(),
+                        f.src_ip.to_string(),
+                        f.src_port,
+                        f.dst_ip.to_string(),
+                        f.dst_port,
+                        f.pid.map(i64::from).unwrap_or(-1),
+                        f.last_seen.to_rfc3339(),
+                        f.state,
+                        f.bytes_in.map(|b| b as i64),
+                        f.bytes_out.map(|b| b as i64),
+                    ],
+                )?;
+            } else {
+                new += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(new)
+    }
+
+    /// Flows seen at or after `since`, newest first.
+    pub fn flows_since(&self, since: DateTime<Utc>) -> Result<Vec<Flow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT first_seen, last_seen, pid, process, proto, src_ip, src_port, dst_ip, dst_port,
+                    dst_mac, state, bytes_in, bytes_out
+             FROM flow WHERE last_seen >= ?1 ORDER BY last_seen DESC",
+        )?;
+        let rows = stmt.query_map([since.to_rfc3339()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, u16>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, u16>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<i64>>(11)?,
+                r.get::<_, Option<i64>>(12)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (fs, ls, pid, process, proto, sip, sport, dip, dport, dmac, state, bi, bo) = row?;
+            out.push(Flow {
+                first_seen: parse_ts(&fs)?,
+                last_seen: parse_ts(&ls)?,
+                pid: u32::try_from(pid).ok(),
+                process,
+                proto: if proto == "udp" {
+                    Proto::Udp
+                } else {
+                    Proto::Tcp
+                },
+                src_ip: sip.parse()?,
+                src_port: sport,
+                dst_ip: dip.parse()?,
+                dst_port: dport,
+                dst_mac: dmac.map(|m| m.parse()).transpose()?,
+                state,
+                bytes_in: bi.map(|b| b as u64),
+                bytes_out: bo.map(|b| b as u64),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Recent events (e.g. `new_device`), newest first.
+    pub fn events(&self, limit: usize) -> Result<Vec<Event>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ts, kind, mac, detail FROM event ORDER BY id DESC LIMIT ?1")?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts, k, m, d) = row?;
+            out.push(Event {
+                ts: parse_ts(&ts)?,
+                kind: k,
+                mac: m,
+                detail: d,
+            });
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Event {
+    pub ts: DateTime<Utc>,
+    pub kind: String,
+    pub mac: Option<String>,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Flag {
     Acknowledged,
@@ -478,6 +624,37 @@ mod tests {
             .unwrap();
         assert_eq!(r.new_devices.len(), 1);
         assert_eq!(s.devices().unwrap()[0].vendor_label(), "Fortinet, Inc.");
+    }
+
+    #[test]
+    fn flow_upsert_keeps_first_seen_and_grows_counters() {
+        let mut s = Store::in_memory().unwrap();
+        let t0 = Utc::now() - Duration::minutes(5);
+        let mut f = Flow {
+            first_seen: t0,
+            last_seen: t0,
+            pid: Some(392),
+            process: Some("apsd".into()),
+            proto: Proto::Tcp,
+            src_ip: "192.168.50.2".parse().unwrap(),
+            src_port: 63020,
+            dst_ip: "17.57.145.132".parse().unwrap(),
+            dst_port: 5223,
+            dst_mac: None,
+            state: Some("Established".into()),
+            bytes_in: Some(100),
+            bytes_out: Some(10),
+        };
+        assert_eq!(s.upsert_flows(std::slice::from_ref(&f)).unwrap(), 1);
+        f.first_seen = t0 + Duration::minutes(1);
+        f.last_seen = t0 + Duration::minutes(1);
+        f.bytes_in = Some(500);
+        assert_eq!(s.upsert_flows(&[f]).unwrap(), 0);
+        let got = s.flows_since(t0).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].first_seen.timestamp(), t0.timestamp());
+        assert_eq!(got[0].bytes_in, Some(500));
+        assert!(got[0].dst_mac.is_none());
     }
 
     #[test]

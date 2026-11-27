@@ -4,6 +4,7 @@
 //! and a thin function that touches the system or network.
 
 pub mod arp;
+pub mod flows;
 pub mod mdns;
 pub mod netinfo;
 pub mod rdns;

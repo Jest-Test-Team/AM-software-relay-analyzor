@@ -180,12 +180,23 @@ pub enum Proto {
     Udp,
 }
 
+impl Proto {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
 /// A network connection observed on this host. `dst_mac` is only set when the
 /// peer is on-link: a MAC can never be learned across a router, so we never
 /// substitute the gateway's MAC for a remote server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Flow {
-    pub ts: DateTime<Utc>,
+    /// When this connection (5-tuple + pid) was first observed.
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
     pub pid: Option<u32>,
     pub process: Option<String>,
     pub proto: Proto,
