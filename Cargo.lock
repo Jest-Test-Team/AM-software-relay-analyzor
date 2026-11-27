@@ -1611,6 +1611,7 @@ dependencies = [
  "mdns-sd",
  "relay-core",
  "rusqlite",
+ "serde_json",
  "tracing",
 ]
 

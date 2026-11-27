@@ -10,6 +10,7 @@ pub mod kaspersky;
 pub mod mdns;
 pub mod netinfo;
 pub mod rdns;
+pub mod sensors;
 pub mod ssdp;
 pub mod sweep;
 

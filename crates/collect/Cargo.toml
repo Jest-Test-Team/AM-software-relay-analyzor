@@ -15,3 +15,4 @@ chrono.workspace = true
 tracing.workspace = true
 mdns-sd = "0.22.0"
 dns-lookup = "4.0.2"
+serde_json.workspace = true

@@ -1,0 +1,5 @@
+{"results":[
+ {"ip":"192.168.50.13","mac":"5a:37:28:13:4c:74","hostname":"Pixel-7","interface":"internal","status":"leased"},
+ {"ip":"192.168.50.29","mac":"98:da:c4:00:00:29","interface":"internal","status":"leased"},
+ {"ip":"192.168.50.30","interface":"internal"}
+],"status":"success"}

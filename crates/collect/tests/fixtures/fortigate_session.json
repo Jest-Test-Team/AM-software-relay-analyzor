@@ -1,0 +1,5 @@
+{"http_method":"GET","results":{"details":[
+ {"proto":"tcp","saddr":"192.168.50.13","daddr":"198.51.100.7","sport":51515,"dport":443,"duration":30,"sentbyte":1000,"rcvdbyte":9000,"src_mac":"5a:37:28:13:4c:74","policyid":1},
+ {"proto":"udp","saddr":"192.168.50.29","daddr":"192.0.2.10","sport":40000,"dport":123,"duration":1},
+ {"proto":"icmp","saddr":"192.168.50.5","daddr":"8.8.8.8"}
+],"summary":{"matched_count":3}},"status":"success"}
